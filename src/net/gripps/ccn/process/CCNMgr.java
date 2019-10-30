@@ -7,6 +7,7 @@ import net.gripps.ccn.churn.NoChurnAlgorithm;
 import net.gripps.ccn.core.*;
 import net.gripps.ccn.fibrouting.BaseRouting;
 import net.gripps.ccn.fibrouting.ChordDHTRouting;
+import net.gripps.ccn.fibrouting.ChordOnBARouting;
 
 
 import java.util.*;
@@ -89,6 +90,7 @@ public class CCNMgr implements Runnable{
         this.routings = new BaseRouting[CCNUtil.ccn_routing_allnum];
         /***ここに，ルーティングアルゴリズムを列挙してください***/
         this.routings[0] = new ChordDHTRouting(this.nodeMap, this.routerMap);
+        this.routings[1] = new ChordOnBARouting(this.nodeMap, this.routerMap);
 
         /*************ここまで*************************/
         this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
@@ -157,7 +159,12 @@ public class CCNMgr implements Runnable{
     }
 
     /**
-     *
+     * ルーティングにて行うこと：
+     * - 各ルータへのID付与(caldIDを使う）max_idを使うかどうかはアルゴリズム次第）
+     * ノードのIDは，直に付与しているのでルーティングに依存しない
+     * - 隣り合うルータのFace追加(NextIDを使う）
+     * - 飛び飛びのルータのFace追加（buildFacesを使う）
+     * - ノード<->ルータのFace追加（buildNeighborRoutersを使うが，BaseRoutingで行っている）
      */
     public void initialize(){
         for(int i = 0; i< CCNUtil.ccn_router_num; i++){
@@ -311,6 +318,7 @@ public class CCNMgr implements Runnable{
      */
     public void buildRouterFaces(){
         CCNRouter r1 =  (CCNRouter)this.routerMap.get(new Long(0));
+        //隣り合う者同士のFace設定
         for(int i=0;i<=CCNUtil.ccn_router_num-1;i++){
             //CCNRouter r1 = (CCNRouter)this.routerMap.get(new Long(i));
            // Long r1_id = this.usedRouting.getNextID(r1.getRouterID());
@@ -324,7 +332,7 @@ public class CCNMgr implements Runnable{
 
             r1 = r2;
         }
-        //ルータどうしのFaceを埋める（今度はとびとび）
+        //飛び飛びのIDのルータどうしのFaceを埋める（今度はとびとび）
         this.usedRouting.buildFaces();
         //上記で，確実に任意のルータ同士で通信が可能になったので，今度は
         //ランダムに関連付けを行う．
