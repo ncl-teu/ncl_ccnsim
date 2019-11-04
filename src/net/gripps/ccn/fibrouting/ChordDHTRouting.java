@@ -2,6 +2,7 @@ package net.gripps.ccn.fibrouting;
 
 import net.gripps.ccn.CCNUtil;
 import net.gripps.ccn.core.*;
+import net.gripps.ccn.process.CCNMgr;
 import net.gripps.clustering.common.aplmodel.CustomIDSet;
 
 import java.util.HashMap;
@@ -18,7 +19,7 @@ import java.util.Set;
  */
 public class ChordDHTRouting extends BaseRouting {
 
-    private CustomIDSet idSet;
+    protected CustomIDSet idSet;
 
 
     /**
@@ -56,7 +57,13 @@ public class ChordDHTRouting extends BaseRouting {
         long hid =  this.calcHashCode(prefix.toString().hashCode());
         //Faceリストから，最も近いものを選択する．
         Iterator<Face> fIte = router.getFace_routerMap().values().iterator();
+        //hidに近くて，かつInterestQueueのサイズが少ないルータのidとするように変更．
         long id = this.getNearestIDFromIterator(fIte, hid);
+        CCNRouter retRouter = CCNMgr.getIns().getRouterMap().get(id);
+        //ルータのPITを取得する．
+        PIT pit = retRouter.getPITEntry();
+
+
         //転送先となるルータのIDを見つかったので，Faceを作成
         Face f = new Face(null, id, CCNUtil.NODETYPE_ROUTER);
         //FIBに追加する．
@@ -64,6 +71,16 @@ public class ChordDHTRouting extends BaseRouting {
 
         return id;
 
+    }
+
+    /**
+     *
+     * @param fIte
+     * @param hid
+     * @return
+     */
+    public long getNearIDAndShortQueueRouter(Iterator<Face> fIte, long hid){
+        return 0;
     }
 
 
