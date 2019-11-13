@@ -30,6 +30,7 @@ public class ChordOnBARouting extends ChordDHTRouting {
 
     @Override
     public void buildFaces() {
+       super.buildFaces();
         Iterator<Long> idIte = this.idSet.iterator();
         Iterator<Long> idIte2 = this.idSet.iterator();
 
