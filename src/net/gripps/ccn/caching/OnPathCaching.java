@@ -37,7 +37,6 @@ public class OnPathCaching extends BaseCachingAlgorithm {
         //隣接ルータに対して，それらのFIBに，当該ルータへのポインタを追加しておく．
         //this.addFacetoFIB(c.getPrefix(), f, r);
 
-
         return true;
     }
 

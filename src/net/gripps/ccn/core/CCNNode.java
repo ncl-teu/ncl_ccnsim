@@ -18,39 +18,39 @@ public class CCNNode extends AbstractNode {
     /**
      * ノードID
      */
-    private Long nodeID;
+    protected Long nodeID;
 
     /**
      * <名前, コンテンツ>で保持された，最初から持っているコンテンツMap
      */
-    private HashMap<String, CCNContents> ownContentsMap;
+    protected HashMap<String, CCNContents> ownContentsMap;
 
     /**
      * 取得したコンテンツを格納するMap
      */
-    //private LinkedList< CCNContents> obtainedContentsMap;
+    //protected LinkedList< CCNContents> obtainedContentsMap;
 
     /**
      * 当該ノードからアクセス可能なCCNルータの集合
      */
-    private HashMap<Long, CCNRouter> routerMap;
+    protected HashMap<Long, CCNRouter> routerMap;
 
     /**
      * 取得するコンテンツ数の最大値
      */
-    private int  max_num_request_contents;
+    protected int  max_num_request_contents;
 
     /**
      * 状態
      */
-     private  int state;
+     protected  int state;
 
 
 
     /**
      * 保留時間
      */
-    private double lambda;
+    protected double lambda;
 
 
     /**
@@ -59,11 +59,18 @@ public class CCNNode extends AbstractNode {
      */
     protected LinkedBlockingQueue<InterestPacket> start_interestQueue;
 
+    /**
+     * FIB
+     */
+    protected FIB FIBEntry;
+
 
     public CCNNode( Long nodeID) {
         super(new LinkedBlockingQueue<InterestPacket>());
         this.type = CCNUtil.NODETYPE_NODE;
         this.nodeID = nodeID;
+        this.FIBEntry = new FIB();
+
         this.ownContentsMap = new HashMap<String, CCNContents>();
         //this.obtainedContentsMap = new LinkedList< CCNContents>();
         this.routerMap = new HashMap<Long, CCNRouter>();
@@ -384,7 +391,13 @@ public class CCNNode extends AbstractNode {
     }
 
 
+    public FIB getFIBEntry() {
+        return FIBEntry;
+    }
 
+    public void setFIBEntry(FIB FIBEntry) {
+        this.FIBEntry = FIBEntry;
+    }
 
     public int  getMax_num_request_contents() {
         return max_num_request_contents;

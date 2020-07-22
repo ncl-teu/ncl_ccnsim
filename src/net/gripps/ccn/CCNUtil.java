@@ -136,6 +136,21 @@ public class CCNUtil extends CloudUtil {
 
     public static double dist_duplicate_interest_mu;
 
+    public static int ccn_prefix_delimiter_num_min;
+
+    public static int ccn_prefix_delimiter_num_max;
+
+    public static int ccn_prefix_degree_min;
+
+    public static int ccn_prefix_degree_max;
+
+    public static int ccn_fib_duplicate_num_min;
+
+    public static int ccn_fib_duplicate_num_max;
+
+    public static double dist_fib_duplicate_mu;
+
+
 
 
     private CCNUtil() {
@@ -231,6 +246,17 @@ public class CCNUtil extends CloudUtil {
             CCNUtil.dist_duplicate_interest = Integer.valueOf(CCNUtil.prop.getProperty("dist_duplicate_interest"));
             CCNUtil.dist_duplicate_interest_mu =  Double.valueOf(CCNUtil.prop.getProperty("dist_duplicate_interest_mu")).doubleValue();
 
+            CCNUtil.ccn_prefix_delimiter_num_min = Integer.valueOf(CCNUtil.prop.getProperty("ccn_prefix_delimiter_num_min"));
+             CCNUtil.ccn_prefix_delimiter_num_max = Integer.valueOf(CCNUtil.prop.getProperty("ccn_prefix_delimiter_num_max"));
+
+             CCNUtil.ccn_prefix_degree_min = Integer.valueOf(CCNUtil.prop.getProperty("ccn_prefix_delimiter_num_min"));
+            CCNUtil.ccn_prefix_degree_max = Integer.valueOf(CCNUtil.prop.getProperty("ccn_prefix_delimiter_num_max"));
+
+
+            CCNUtil.ccn_fib_duplicate_num_min = Integer.valueOf(CCNUtil.prop.getProperty("ccn_fib_duplicate_num_min"));
+            CCNUtil.ccn_fib_duplicate_num_max = Integer.valueOf(CCNUtil.prop.getProperty("ccn_fib_duplicate_num_max"));
+
+            CCNUtil.dist_fib_duplicate_mu = Double.valueOf(CCNUtil.prop.getProperty("dist_fib_duplicate_mu")).doubleValue();
         } catch (Exception e) {
             e.printStackTrace();
         }

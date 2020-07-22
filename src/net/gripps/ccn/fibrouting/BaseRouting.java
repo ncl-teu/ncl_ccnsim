@@ -25,11 +25,19 @@ public abstract class BaseRouting {
      */
     protected HashMap<Long, CCNRouter> routerMap;
 
+    protected String[] item_root = {"www", "yahoo", "google", "yama", "kawa", "teu","china", "america","europe",
+    "africa", "japan", "thailand", "italy", "england", "germany", "example"};
+
+    protected String[] item_mid = {"test", "site", "toyama", "osaka","nagoya","hokkaido","hiroshima","kanagawa","okinawa","chiba"};
+
+    protected String[] item_last = {"test", "machi", "kawa","yama", "fafjask", "regjdf", "ffdai3", "fjfdsa2r", "fdsaa", "fdsai1",
+    "845fjlfs", "rfjsalfjdsa"};
+
 
     public BaseRouting() {
-    /**    this.nodeMap = CCNMgr.getIns().getNodeMap();
+      /*this.nodeMap = CCNMgr.getIns().getNodeMap();
         this.routerMap = CCNMgr.getIns().getRouterMap();
-     **/
+*/
     }
 
     /**
@@ -151,6 +159,28 @@ public abstract class BaseRouting {
             }
 
         }
+    }
+
+    public String generatePrefix(){
+        int del_num = CCNUtil.genInt(CCNUtil.ccn_prefix_delimiter_num_min, CCNUtil.ccn_prefix_delimiter_num_max);
+        int idx_root = CCNUtil.genInt(0, this.item_root.length-1);
+        String str_root = this.item_root[idx_root];
+        StringBuffer buf = new StringBuffer("/"+str_root);
+        //デリミタが続く間のループ
+        for(int i=0;i<del_num-1;i++){
+            buf.append("/");
+            int idx_mid = CCNUtil.genInt(0, this.item_mid.length-1);
+            String str_mid = this.item_mid[idx_mid];
+            buf.append(str_mid);
+        }
+        buf.append("/");
+        //最後に，ファイル名を追加する．
+        int idx_file = CCNUtil.genInt(0, this.item_last.length-1);
+        String fileName = this.item_last[idx_file];
+        buf.append(fileName);
+
+        return buf.toString();
+
     }
 
     public HashMap<Long, CCNNode> getNodeMap() {

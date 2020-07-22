@@ -4,6 +4,7 @@ import net.gripps.ccn.CCNUtil;
 import net.gripps.ccn.fibrouting.BaseRouting;
 import net.gripps.ccn.fibrouting.ChordDHTRouting;
 import net.gripps.ccn.fibrouting.ChordOnBARouting;
+import net.gripps.ccn.fibrouting.LongestMatchRouting;
 
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -43,9 +44,10 @@ public class AbstractNode  implements Runnable {
 
         this.interestQueue = interestQueue;
         this.bw = CCNUtil.genLong2(CCNUtil.ccn_bw_min, CCNUtil.ccn_bw_max, CCNUtil.ccn_dist_bw, CCNUtil.ccn_dist_bw_mu);
-        this.routings = new BaseRouting[2];
+        this.routings = new BaseRouting[CCNUtil.ccn_routing_allnum];
         this.routings[0] = new ChordDHTRouting();
         this.routings[1] = new ChordOnBARouting();
+        this.routings[2] = new LongestMatchRouting();
         this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
         this.contentsQueue = new LinkedBlockingQueue<CCNContents>();
         this.receiver = new CCNDataReceiver(this.contentsQueue, this.bw*CCNUtil.ccn_actual_data_rate);
@@ -55,9 +57,10 @@ public class AbstractNode  implements Runnable {
     public AbstractNode(){
         this.interestQueue = new LinkedBlockingQueue<InterestPacket>();
         this.bw = CCNUtil.genLong2(CCNUtil.ccn_bw_min, CCNUtil.ccn_bw_max, CCNUtil.ccn_dist_bw, CCNUtil.ccn_dist_bw_mu);
-        this.routings = new BaseRouting[2];
+        this.routings = new BaseRouting[CCNUtil.ccn_routing_allnum];
         this.routings[0] = new ChordDHTRouting();
         this.routings[1] = new ChordOnBARouting();
+        this.routings[2] = new LongestMatchRouting();
         this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
         this.contentsQueue = new LinkedBlockingQueue<CCNContents>();
         this.receiver = new CCNDataReceiver(this.contentsQueue, this.bw*CCNUtil.ccn_actual_data_rate);

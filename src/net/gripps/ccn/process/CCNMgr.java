@@ -8,6 +8,7 @@ import net.gripps.ccn.core.*;
 import net.gripps.ccn.fibrouting.BaseRouting;
 import net.gripps.ccn.fibrouting.ChordDHTRouting;
 import net.gripps.ccn.fibrouting.ChordOnBARouting;
+import net.gripps.ccn.fibrouting.LongestMatchRouting;
 
 
 import java.util.*;
@@ -91,14 +92,16 @@ public class CCNMgr implements Runnable{
         /***ここに，ルーティングアルゴリズムを列挙してください***/
         this.routings[0] = new ChordDHTRouting(this.nodeMap, this.routerMap);
         this.routings[1] = new ChordOnBARouting(this.nodeMap, this.routerMap);
-
+        this.routings[2] = new LongestMatchRouting(this.nodeMap, this.routerMap);
         /*************ここまで*************************/
         this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
 
         //**********Churningアルゴリズム***************/
         this.churns = new BaseChurnResilienceAlgorithm[CCNUtil.ccn_churn_allnum];
         this.churns[0] = new NoChurnAlgorithm(this.usedRouting);
-        this.churns[1] = new ChordDHTCRAlgorithm((ChordDHTRouting)this.usedRouting);
+        if(CCNUtil.ccn_routing_no <= 1) {
+            this.churns[1] = new ChordDHTCRAlgorithm((ChordDHTRouting) this.usedRouting);
+        }
         this.usedChurn = this.churns[CCNUtil.ccn_churn_enable];
         //************:ここまで*************************/
 
@@ -109,7 +112,7 @@ public class CCNMgr implements Runnable{
         this.buildInterestPackets();
         this.buildFIB();
 
-//System.out.println("test");
+System.out.println("test");
 
     }
 
@@ -208,16 +211,24 @@ public class CCNMgr implements Runnable{
         //次に，コンテンツを各ノードへ配備する．
         Iterator<CCNNode> ite = this.nodeMap.values().iterator();
         while(ite.hasNext()){
+
             CCNNode node = (CCNNode)ite.next();
             int content_cnt = CCNUtil.genInt(CCNUtil.ccn_node_num_contents_min, CCNUtil.ccn_node_num_contents_max);
             //コンテンツを生成して配備する．
             for(int i=0;i<content_cnt;i++){
-                UUID uuid = UUID.randomUUID();
-                String prefix  = uuid.toString();
+                UUID uuid = null;
+                String prefix = null;
+                if(CCNUtil.ccn_routing_no <= 1){
+                    uuid = UUID.randomUUID();
+                    prefix  = uuid.toString();
+                }else{
+                        prefix = this.usedRouting.generatePrefix();
+                }
                 long size = CCNUtil.genLong(CCNUtil.ccn_contents_size_min, CCNUtil.ccn_contents_size_max);
                 int type = CCNUtil.genInt(CCNUtil.TYPE_MOVIE, CCNUtil.TYPE_DATA);
                 CCNContents c = new CCNContents(size, prefix, node.getNodeID(), type, System.currentTimeMillis(), -1, false);
                 node.getOwnContentsMap().put(prefix, c);
+
                 long hcode = this.usedRouting.calcHashCode(prefix.toString().hashCode());
                 c.setCustomID(hcode);
                 //ここのIDは，別のID（コンテンツID）であって，chordで使われるcustomID(ハッシュコード）ではない．
@@ -318,77 +329,87 @@ public class CCNMgr implements Runnable{
      */
     public void buildRouterFaces(){
         CCNRouter r1 =  (CCNRouter)this.routerMap.get(new Long(0));
-        //隣り合う者同士のFace設定
-        for(int i=0;i<=CCNUtil.ccn_router_num-1;i++){
-            //CCNRouter r1 = (CCNRouter)this.routerMap.get(new Long(i));
-           // Long r1_id = this.usedRouting.getNextID(r1.getRouterID());
-            Long nextid = this.usedRouting.getNextID(r1.getRouterID());
-            CCNRouter r2 = (CCNRouter)this.routerMap.get(new Long(nextid));
-            Face f1 = new Face(null, r2.getRouterID(), CCNUtil.NODETYPE_ROUTER);
-            Long id1 = r1.addFace(f1, r1.getFace_routerMap());
+        //Chordアルゴリズムに限って行う処理．
+        if(CCNUtil.ccn_routing_no <=1) {
+            //隣り合う者同士のFace設定
+            for (int i = 0; i <= CCNUtil.ccn_router_num - 1; i++) {
+                //CCNRouter r1 = (CCNRouter)this.routerMap.get(new Long(i));
+                // Long r1_id = this.usedRouting.getNextID(r1.getRouterID());
 
-            Face f2 = new Face(null, r1.getRouterID(), CCNUtil.NODETYPE_ROUTER);
-            Long id2 = r2.addFace(f2, r2.getFace_routerMap());
+                Long nextid = this.usedRouting.getNextID(r1.getRouterID());
+                CCNRouter r2 = (CCNRouter) this.routerMap.get(new Long(nextid));
+                Face f1 = new Face(null, r2.getRouterID(), CCNUtil.NODETYPE_ROUTER);
+                Long id1 = r1.addFace(f1, r1.getFace_routerMap());
 
-            r1 = r2;
+                Face f2 = new Face(null, r1.getRouterID(), CCNUtil.NODETYPE_ROUTER);
+                Long id2 = r2.addFace(f2, r2.getFace_routerMap());
+
+                r1 = r2;
+            }
+
+
+            //飛び飛びのIDのルータどうしのFaceを埋める（今度はとびとび）
+            this.usedRouting.buildFaces();
+        }else{
+            //Chord以外でのルータ同士のFace追加処理．
+            //今のところは，ランダムで追加させる．
+            Iterator<CCNRouter> rIte = this.routerMap.values().iterator();
+            while(rIte.hasNext()){
+                CCNRouter r = (CCNRouter)rIte.next();
+                long id = r.getRouterID().longValue();
+
+                //while(r.getFace_num() > r.getFace_routerMap().size()){
+                for(int k=0;k<r.getFace_num()-2;k++){
+                    //rに対して，相手を探す．
+                    //0?id-1, id+1~最後から探す．
+                    //0以外であれば，乱数を生成する．
+                    if(id == 0){
+                        long id2 = CCNUtil.genLong(1, CCNUtil.ccn_router_num-1);
+                        //もしすでにFaceにあるのなら，coneinue
+                        if(r.containsIDinRouterFaceMap(new Long(id2))){
+                            continue;
+                        }else{
+                            //新規のIDなら，追加する．
+                            CCNRouter r2 = (CCNRouter)this.routerMap.get(new Long(id2));
+                            this.associateFaces(r, r2);
+                            continue;
+
+                        }
+
+                    }
+
+                    if(id - 0>0){
+                        long id2 = -1;
+                        double rate = CCNUtil.getRoundedValue((double)id/(double)(CCNUtil.ccn_router_num-1));
+                        double val = Math.random();
+                        //IDに応じて決められた確率で，サイコロをふる．
+                        if(val >= rate){
+                            id2 = CCNUtil.genLong(id+1, CCNUtil.ccn_router_num-1);
+
+                        }else{
+                            id2 = CCNUtil.genLong(0, id-1);
+
+                        }
+
+                        //もしすでにFaceにあるのなら，coneinue
+                        if(r.containsIDinRouterFaceMap(id2)){
+
+                            continue;
+                        }else{
+
+                            //新規のIDなら，追加する．
+                            CCNRouter r2 = (CCNRouter)this.routerMap.get(new Long(id2));
+                            this.associateFaces(r, r2);
+                        }
+                    }
+                }
+
+            }
         }
-        //飛び飛びのIDのルータどうしのFaceを埋める（今度はとびとび）
-        this.usedRouting.buildFaces();
         //上記で，確実に任意のルータ同士で通信が可能になったので，今度は
         //ランダムに関連付けを行う．
 /**
-        Iterator<CCNRouter> rIte = this.routerMap.values().iterator();
-        while(rIte.hasNext()){
-            CCNRouter r = (CCNRouter)rIte.next();
-            long id = r.getRouterID().longValue();
 
-            //while(r.getFace_num() > r.getFace_routerMap().size()){
-            for(int k=0;k<r.getFace_num()-2;k++){
-                //rに対して，相手を探す．
-                //0?id-1, id+1~最後から探す．
-                //0以外であれば，乱数を生成する．
-                if(id == 0){
-                    long id2 = CCNUtil.genLong(1, CCNUtil.ccn_router_num-1);
-                    //もしすでにFaceにあるのなら，coneinue
-                    if(r.containsIDinRouterFaceMap(new Long(id2))){
-                        continue;
-                    }else{
-                        //新規のIDなら，追加する．
-                        CCNRouter r2 = (CCNRouter)this.routerMap.get(new Long(id2));
-                        this.associateFaces(r, r2);
-                        continue;
-
-                    }
-
-                }
-
-                if(id - 0>0){
-                    long id2 = -1;
-                    double rate = CCNUtil.getRoundedValue((double)id/(double)(CCNUtil.ccn_router_num-1));
-                    double val = Math.random();
-                    //IDに応じて決められた確率で，サイコロをふる．
-                    if(val >= rate){
-                        id2 = CCNUtil.genLong(id+1, CCNUtil.ccn_router_num-1);
-
-                    }else{
-                        id2 = CCNUtil.genLong(0, id-1);
-
-                    }
-
-                    //もしすでにFaceにあるのなら，coneinue
-                    if(r.containsIDinRouterFaceMap(id2)){
-
-                        continue;
-                    }else{
-
-                        //新規のIDなら，追加する．
-                        CCNRouter r2 = (CCNRouter)this.routerMap.get(new Long(id2));
-                        this.associateFaces(r, r2);
-                    }
-                }
-            }
-
-        }
  **/
 
     }

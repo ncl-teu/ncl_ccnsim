@@ -25,85 +25,85 @@ public class CCNRouter extends AbstractNode {
     /**
      * ルータのID
      */
-    private Long routerID;
+    protected Long routerID;
 
     /**
      * FIB
      */
-    private FIB FIBEntry;
+    protected FIB FIBEntry;
 
     /**
      * PIT
      */
-    private PIT PITEntry;
+    protected PIT PITEntry;
 
     /**
      * Contents Store
      */
-    private CS CSEntry;
+    protected CS CSEntry;
 
     /**
      * Faceのリスト（ルータ宛）
      */
-    private HashMap<Long, Face> face_routerMap;
+    protected HashMap<Long, Face> face_routerMap;
 
     /**
      * Faceリスト（ノード宛）
      */
-    private HashMap<Long, Face> face_nodeMap;
+    protected HashMap<Long, Face> face_nodeMap;
 
     /**
      * Faceの最大保持数
      */
-    private int face_num;
+    protected int face_num;
 
     /**
      * CSの最大保持数
      */
-    private int cs_num;
+    protected int cs_num;
 
     /**
      * FIBの最大保持数
      */
-    private int fib_num;
+    protected int fib_num;
 
     /**
      * PITの最大保持数
      */
-    private int pit_num;
+    protected int pit_num;
 
     /**
      * BreadCrumbs(パンくず）のマップ
      * (prefix, パンくず)のMap構造．
      */
-    private HashMap<String, BC> bcMap;
+    protected HashMap<String, BC> bcMap;
 
 
     /**
      * キャッシュアルゴリズムの配列
      */
-    private BaseCachingAlgorithm[] cachings;
+    protected BaseCachingAlgorithm[] cachings;
 
     /**
      * 実際に使われるキャッシュアルゴリズム
      */
-    private BaseCachingAlgorithm usedCaching;
+    protected BaseCachingAlgorithm usedCaching;
 
     /**
      * BreadCrumbsアルゴリズムの配列
      */
-    private BaseBreadCrumbsAlgorithm[] bcs;
+    protected BaseBreadCrumbsAlgorithm[] bcs;
 
     /**
      * 実際に使われるBreadCrumbsアルゴリズム
      */
-    private BaseBreadCrumbsAlgorithm usedBC;
+    protected BaseBreadCrumbsAlgorithm usedBC;
 
 
     /**
      * 状態
      */
-    private int state;
+    protected int state;
 
     /**
      * @param routerID
@@ -446,7 +446,14 @@ public class CCNRouter extends AbstractNode {
             } else {
                 //Faceから，Prefixのハッシュに近いものを選択する．
                 Long routerID = this.usedRouting.addFaceToFIBAsNewEntry(p.getPrefix(), this);
+
                 Face face2 = this.findFaceByID(routerID, this.getFace_routerMap());
+                if(face2 == null){
+                    face2 = this.findFaceByID(routerID, this.getFace_nodeMap());
+                }
+                if(face2 == null){
+                    System.out.println("NULL");
+                }
                 this.forwardInterest(face2, p);
 
             }
@@ -619,6 +626,7 @@ public class CCNRouter extends AbstractNode {
             //prefixがない場合，
         }*/
         if(this.pit_num <= this.getPITEntry().getTable().size()){
+
             return false;
         }
         if (toType == CCNUtil.NODETYPE_ROUTER) {

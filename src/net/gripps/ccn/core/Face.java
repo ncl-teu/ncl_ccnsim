@@ -22,10 +22,16 @@ public class Face {
      */
     private int type;
 
+    /**
+     * 優先度．この値が小さければ良い．
+     */
+    private double metric;
+
     public Face(Long faceID, Long pointerID, int type) {
         this.faceID = faceID;
         this.pointerID = pointerID;
         this.type = type;
+        this.metric = 0.0d;
     }
 
     public Long getFaceID() {
@@ -50,5 +56,13 @@ public class Face {
 
     public void setType(int type) {
         this.type = type;
+    }
+
+    public double getMetric() {
+        return metric;
+    }
+
+    public void setMetric(double metric) {
+        this.metric = metric;
     }
 }
