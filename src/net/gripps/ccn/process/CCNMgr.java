@@ -112,7 +112,6 @@ public class CCNMgr implements Runnable{
         this.buildInterestPackets();
         this.buildFIB();
 
-System.out.println("test");
 
     }
 

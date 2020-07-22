@@ -53,6 +53,7 @@ public class LongestMatchRouting extends BaseRouting {
             while(afIte.hasNext()){
                 Face af = afIte.next();
                 ar.getFIBEntry().addFace("/", af);
+                //ar.getFace_routerMap().put(af.getPointerID(), af);
             }
         }
 
@@ -182,13 +183,20 @@ public class LongestMatchRouting extends BaseRouting {
             String retPrefix = null;
             while(pIte.hasNext()){
                 String fibPrefix = pIte.next();
-                int cnt = this.longestMatch(prefix, fibPrefix);
+                //まずは，startwithであることが必要．
+                int cnt = -1;
+                if(prefix.startsWith(fibPrefix)){
+                    cnt = this.longestMatch(prefix, fibPrefix);
+                }
+
+
                 if(cnt >= maxCnt){
                     maxCnt = cnt;
                     retPrefix = fibPrefix;
                 }
 
             }
+
             //対象prerixが決まったので，後はどのfaceにするか．
             //とりあえず，ランダム．
            LinkedList<Face> retFList = router.getFIBEntry().getTable().get(retPrefix);

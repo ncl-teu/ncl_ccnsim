@@ -452,9 +452,11 @@ public class CCNRouter extends AbstractNode {
                     face2 = this.findFaceByID(routerID, this.getFace_nodeMap());
                 }
                 if(face2 == null){
-                    System.out.println("NULL");
+                    //System.out.println("NULL");
+                }else{
+                    this.forwardInterest(face2, p);
+
                 }
-                this.forwardInterest(face2, p);
 
             }
             // }else{
