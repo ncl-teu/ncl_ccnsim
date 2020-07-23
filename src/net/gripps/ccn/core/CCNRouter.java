@@ -261,8 +261,7 @@ public class CCNRouter extends AbstractNode {
                             }
 
                         }
-                        //そしてPITからエントリを削除する．
-                        //this.getPITEntry().removeByKey(c.getPrefix());
+
 
                         CCNContents copyContents = (CCNContents) c.deepCopy();
                         if(this.cs_num <= this.CSEntry.getCacheMap().size()){
@@ -273,8 +272,10 @@ public class CCNRouter extends AbstractNode {
                         }
 
                     }
+                    //そしてPITからエントリを削除する．
+                    this.getPITEntry().removeByKey(c.getPrefix());
                     //PITから指定エントリを消す．
-                    this.getPITEntry().removeFace(c.getPrefix(), lastH.fromID);
+                    //this.getPITEntry().removeFace(c.getPrefix(), lastH.fromID);
                 } else {
                     CCNContents copyContents = (CCNContents) c.deepCopy();
                     //PITになければどうするか
