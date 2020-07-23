@@ -91,7 +91,7 @@ public class CCNContents implements Serializable, Cloneable{
     /**
      * 生成された時刻@オリジナルコンテンツ
      */
-    private long generatedTimeAtSrc;
+    private Long  generatedTimeAtSrc;
 
     /**
      * 生成された時刻＠キャッシュ
@@ -101,18 +101,18 @@ public class CCNContents implements Serializable, Cloneable{
     /**
      * 経由したノード（ルータ）での最小のBW．
      */
-    private long minBW;
+    private Long  minBW;
 
     /**
      * BCによって発見されたかどうかのフラグ
      */
-    private boolean isBC;
+    private Boolean isBC;
 
     /**
      * CCN関連の処理が失敗して，最終的にIPネットワーク上で
      * 転送されれば，trueに設定される．
      */
-    private boolean isIPUsed;
+    private Boolean  isIPUsed;
 
 
 

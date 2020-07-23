@@ -238,6 +238,7 @@ public class CCNRouter extends AbstractNode {
                             if (f.getPointerID() == this.getRouterID()) {
                                 //PITエントリの中に，Faceのターゲットが自分であるもの
                                 //System.out.println("test");
+
                             } else {
                                 LinkedList<ForwardHistory> fList = c.getHistoryList();
                                 //あて先がルータであれば，ルータに送る．
@@ -261,7 +262,8 @@ public class CCNRouter extends AbstractNode {
 
                         }
                         //そしてPITからエントリを削除する．
-                        this.getPITEntry().removeByKey(c.getPrefix());
+                        //this.getPITEntry().removeByKey(c.getPrefix());
+
                         CCNContents copyContents = (CCNContents) c.deepCopy();
                         if(this.cs_num <= this.CSEntry.getCacheMap().size()){
                             this.usedCaching.chachingIFCSFULL(c, this);
@@ -271,6 +273,8 @@ public class CCNRouter extends AbstractNode {
                         }
 
                     }
+                    //PITから指定エントリを消す．
+                    this.getPITEntry().removeFace(c.getPrefix(), lastH.fromID);
                 } else {
                     CCNContents copyContents = (CCNContents) c.deepCopy();
                     //PITになければどうするか
@@ -399,6 +403,7 @@ public class CCNRouter extends AbstractNode {
                         System.currentTimeMillis(), -1);
                 c.getHistoryList().add(f);
                 r.forwardData(c);
+                //this.getPITEntry().removeByKey(p.getPrefix());
                 CCNLog.getIns().log(",13,"+p.getPrefix()+",-"+","+fList.getFirst().getStartTime()+","+ fList.getLast().getArrivalTime()+","+
                         (fList.getLast().getArrivalTime()-fList.getFirst().getStartTime())+","+
                         p.getHistoryList().getFirst().getFromID()+","+this.getRouterID()+","+fList.size()+",-"+","+"o"+","+"-");
