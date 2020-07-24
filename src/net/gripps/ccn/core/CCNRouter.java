@@ -9,6 +9,7 @@ import net.gripps.ccn.breadcrumbs.NoBreadCrumbsAlgorithm;
 import net.gripps.ccn.caching.BaseCachingAlgorithm;
 import net.gripps.ccn.caching.NoCaching;
 import net.gripps.ccn.caching.OnPathCaching;
+import net.gripps.ccn.caching.OnPathPlus;
 import net.gripps.ccn.process.CCNMgr;
 
 import java.util.HashMap;
@@ -127,6 +128,7 @@ public class CCNRouter extends AbstractNode {
         /***ここに，キャッシングアルゴリズムを列挙してください**/
         this.cachings[0] = new OnPathCaching();
         this.cachings[1] = new NoCaching();
+        this.cachings[2] = new OnPathPlus();
 
         /***ここまで**/
         this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
@@ -247,7 +249,7 @@ public class CCNRouter extends AbstractNode {
                                     CCNLog.getIns().log(",3,"+c.getPrefix()+",-"+","+fList.getFirst().getStartTime()+","+ fList.getLast().getArrivalTime()+","+
                                             (fList.getLast().getArrivalTime()-fList.getFirst().getStartTime())+","+
                                             c.getHistoryList().getFirst().getFromID()+",-"+","+fList.size()+",-"+","+"x"+","+"-");
-                                    return;
+                                    //return;
                                 }
                                 //転送履歴を作成して，追加
                                 ForwardHistory f2 = new ForwardHistory(this.routerID, CCNUtil.NODETYPE_ROUTER, router.getRouterID(), CCNUtil.NODETYPE_ROUTER,
@@ -385,6 +387,7 @@ public class CCNRouter extends AbstractNode {
         //もしCSにあれば，データを返す．
         if (this.CSEntry.getCacheMap().containsKey(p.getPrefix())) {
             CCNContents c = this.CSEntry.getCacheMap().get(p.getPrefix());
+            c.setCache(true);
 
             //最新の履歴を見て，送信もとを特定する．
             if (h.getFromType() == CCNUtil.NODETYPE_ROUTER) {
@@ -424,6 +427,8 @@ public class CCNRouter extends AbstractNode {
 
 
             }
+            //自身のprocessContents
+            //this.processContents(c);
         } else {
             //CSになければ，PITを見る．
             boolean isNotFound = false;
