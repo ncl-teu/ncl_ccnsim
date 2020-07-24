@@ -57,17 +57,28 @@ public class ChordDHTRouting extends BaseRouting {
         long hid =  this.calcHashCode(prefix.toString().hashCode());
         //Faceリストから，最も近いものを選択する．
         Iterator<Face> fIte = router.getFace_routerMap().values().iterator();
-        //hidに近くて，かつInterestQueueのサイズが少ないルータのidとするように変更．
-        long id = this.getNearestIDFromIterator(fIte, hid);
-        CCNRouter retRouter = CCNMgr.getIns().getRouterMap().get(id);
-        //ルータのPITを取得する．
-        PIT pit = retRouter.getPITEntry();
+        long id = -1;
+        while(fIte.hasNext()){
+
+            //hidに近くて，かつInterestQueueのサイズが少ないルータのidとするように変更．
+            id = this.getNearestIDFromIterator(fIte, hid);
+            CCNRouter retRouter = CCNMgr.getIns().getRouterMap().get(id);
+            //ルータのPITを取得する．
+            PIT pit = retRouter.getPITEntry();
+            if(pit.getTable().size() > CCNUtil.ccn_chord_pit_threshold){
+                fIte.next();
+                continue;
+            }
 
 
-        //転送先となるルータのIDを見つかったので，Faceを作成
-        Face f = new Face(null, id, CCNUtil.NODETYPE_ROUTER);
-        //FIBに追加する．
-        router.getFIBEntry().addFace(prefix, f);
+            //転送先となるルータのIDを見つかったので，Faceを作成
+            Face f = new Face(null, id, CCNUtil.NODETYPE_ROUTER);
+            //FIBに追加する．
+            router.getFIBEntry().addFace(prefix, f);
+            break;
+
+        }
+
 
         return id;
 
@@ -652,16 +663,23 @@ public class ChordDHTRouting extends BaseRouting {
         long mindif = CCNUtil.MAXValue;
         long retID = CCNUtil.MINUS_VAUE;
         Long maxID = CCNUtil.MINUS_VAUE;
-
         while (fIte.hasNext()) {
             Face f = fIte.next();
             Long id = f.getPointerID();
             if (id.longValue() >= fid.longValue()) {
                 long dif = id.longValue() - fid.longValue();
-                if (mindif >= dif) {
-                    mindif = dif;
-                    retID = id.longValue();
-                }
+              //  if(CCNMgr.getIns().getRouterMap().containsKey(id)){
+               //    CCNRouter r = CCNMgr.getIns().getRouterMap().get(id);
+                    //if(r.getPITEntry().getTable().size() > CCNUtil.ccn_chord_pit_threshold){
+
+              //      }else{
+                        if (mindif >= dif) {
+                            mindif = dif;
+                            retID = id.longValue();
+                        }
+                  //  }
+              //  }
+
 
             } else {
                 //idが小さい場合，とりあえず最大値を保持しておく．
