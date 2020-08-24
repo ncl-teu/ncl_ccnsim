@@ -13,7 +13,7 @@ TIMESATMP, type, prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest
 - As for **type** field, we have the following value:
 - 1: Interest is arrived at the **original server** that has the original content (non-cached data). 
 - 2: Original data is returned to the client from the **orignal server**. 
-- 13: Interest is arrived at the cache holding router (i.e., cach hit). 
+- 13: Interest is arrived at the cache holding router (i.e., cache hit). 
 - 3: Cached data is return to the client from the cache holding router. 
 - 4: Interest is arrived at the router by BreadCrumbs pointer.
 - 5: A new CCN router joined. 
