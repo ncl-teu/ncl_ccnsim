@@ -3,8 +3,8 @@ CCN (Contents-Centric Networking) Simulator
 # Manuals (in Japanese)
 - [here](https://github.com/ncl-teu/ncl_ccnsim/tree/master/manuals). 
 # How to use
-- Double click `ccnrun.bat' for windows or run `./ccnrun.sh` for Linux. 
-- The configuration file is **ccn.properties**. 
+- Double click `ccnrun.bat` for windows or run `./ccnrun.sh` for Linux. 
+- The configuration file is **ccn.properties** (click here)[https://github.com/ncl-teu/ncl_ccnsim/blob/master/ccn.properties]
 - The all log if written to `ccn/ccnlog.csv` as overwritten mode. The format of the log is as follows: 
 ~~~
 TIMESATMP, type, prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest_senderID,Data(Cache)holdingNodeID, Hop#,# of SharedConnections,ContentsFound/Not,ByBC?,Memo
