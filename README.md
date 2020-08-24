@@ -5,7 +5,11 @@ CCN (Contents-Centric Networking) Simulator
 # How to use
 - Double click `ccnrun.bat' for windows or run `./ccnrun.sh` for Linux. 
 - The configuration file is **ccn.properties**. 
-- The all log if written to `ccn/ccnlog.csv` as overwritten mode. 
+- The all log if written to `ccn/ccnlog.csv` as overwritten mode. The format of the log is as follows: 
+~~~
+,type(1:InterestARRIVED->/2:Org_DataGET<-/13:CacheARRIVED->/3:CacheGET<-/4:CacheARRIVEDByBC->/5:RouterJOIN/6:RouterLEAVE), prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest_senderID,Data(Cache)holdingNodeID, Hop#,# of SharedConnections,ContentsFound/Not,ByBC?,Memo
+
+~~~
 # Cache algorithm
 - Since the simulator is based on Java, please create a new class that extends `net.gripps.ccn.caching.BaseCachingAlgorithm`. 
 - Example caching algorithm is implemented as **OnPathCaching.java**. Please refer to it. 
