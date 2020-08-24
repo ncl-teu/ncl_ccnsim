@@ -7,9 +7,17 @@ CCN (Contents-Centric Networking) Simulator
 - The configuration file is **ccn.properties**. 
 - The all log if written to `ccn/ccnlog.csv` as overwritten mode. The format of the log is as follows: 
 ~~~
-,type(1:InterestARRIVED->/2:Org_DataGET<-/13:CacheARRIVED->/3:CacheGET<-/4:CacheARRIVEDByBC->/5:RouterJOIN/6:RouterLEAVE), prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest_senderID,Data(Cache)holdingNodeID, Hop#,# of SharedConnections,ContentsFound/Not,ByBC?,Memo
-
+TIMESATMP, type, prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest_senderID,Data(Cache)holdingNodeID, Hop#,# of SharedConnections,ContentsFound/Not,ByBC?,Memo
 ~~~
+- As for **type** field, we have 
+1. Interest is arrived at the **original server** that has the original content (non-cached data). 
+2. Original data is returned to the client from the **orignal server**. 
+13. Interest is arrived at the cache holding router (i.e., cach hit). 
+3. Cached data is return to the client from the cache holding router. 
+4. Interest is arrived at the router by BreadCrumbs pointer.
+5. A new ICN router joined. 
+6. A ICN router leaves. 
+
 # Cache algorithm
 - Since the simulator is based on Java, please create a new class that extends `net.gripps.ccn.caching.BaseCachingAlgorithm`. 
 - Example caching algorithm is implemented as **OnPathCaching.java**. Please refer to it. 
