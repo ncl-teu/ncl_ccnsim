@@ -18,10 +18,28 @@ this.cachings[0] = new OnPathCaching();
 this.cachings[1] = new NoCaching();
 this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
 ~~~
+
 After:
 ~~~
 this.cachings[0] = new OnPathCaching();
 this.cachings[1] = new NoCaching();
-**this.cachings[2] = new 新規クラス名();**
+this.cachings[2] = new NEW_CLASS();
 this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
+~~~
+# FIB routing algorithm
+- Please create a new class that extends `net.gripps.ccn.fibrouting.BaseRouting`. 
+- Currently, we have **ChordDHTRouting**, **ChordDHTBARouging(Chord with Barabasi-Albert Network)**, and **LongestMatchRouting**. 
+## How to create a new routing algorithm
+1. In ccn.properties, please set `ccn_routing_no=0` to `ccn_routing_no=1`(i.e., change the used index no). And please set `ccn_routing_allnum=1` to `ccn_routing_allnum=2` (i.e., increment it as the number of candidate caching algorithms). 
+2. In `ccn.net.gripps.ccn.process.CCNMgr', please change as follows: 
+Before: 
+~~~
+this.routings[0] = new ChordDHTRouting(this.nodeMap, this.routerMap);
+this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
+~~~
+
+After:
+~~~
+this.routings[0] = new ChordDHTRouting(this.nodeMap, this.routerMap);
+this.routings[1] = new NEW_CLASS(this.nodeMap, this.routerMap);
 ~~~
