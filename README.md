@@ -12,3 +12,16 @@ CCN (Contents-Centric Networking) Simulator
 ## How to create a new caching algorithm
 1. In ccn.properties, please set `ccn_caching_no=0` to `ccn_caching_no=1`(i.e., change the used index no). And please set `ccn_caching_allnum=1` to `ccn_caching_allnum=2` (i.e., increment it as the number of candidate caching algorithms). 
 2. In `ccn.net.gripps.ccn.core.CCNRouter', please change as follows: 
+Before: 
+~~~
+this.cachings[0] = new OnPathCaching();
+this.cachings[1] = new NoCaching();
+this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
+~~~
+After:
+~~~
+this.cachings[0] = new OnPathCaching();
+this.cachings[1] = new NoCaching();
+**this.cachings[2] = new 新規クラス名();**
+this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
+~~~
