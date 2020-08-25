@@ -57,6 +57,7 @@ After:
 ~~~
 this.routings[0] = new ChordDHTRouting(this.nodeMap, this.routerMap);
 this.routings[1] = new NEW_CLASS(this.nodeMap, this.routerMap);
+this.usedRouting = this.routings[CCNUtil.ccn_routing_no];
 ~~~
 # BreadCrumbs algorithm
 - Please create a new class that extends `net.gripps.ccn.breadcrumbs.BaseBreadCrumbsAlgorithm`. 
