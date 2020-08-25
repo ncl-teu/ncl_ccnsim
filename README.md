@@ -77,7 +77,8 @@ After:
 ~~~
 this.bcs[0] = new NoBreadCrumbsAlgorithm();
 this.bcs[1] = new BreadCrumbsAlgorithm();
-this.bcs[2] = new NEW_CLASS()
+this.bcs[2] = new NEW_CLASS();
+this.usedBC = this.bcs[CCNUtil.ccn_bc_enable];
 ~~~
 # Churn resilience algorithm in CCN
 - Please create a new class that extends `net.gripps.ccn.churn.BaseChurnResilienceAlgorithm`. 
