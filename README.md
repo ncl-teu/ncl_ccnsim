@@ -101,3 +101,9 @@ this.churns[1] = new ChordDHTCRAlgorithm((ChordDHTRouting)this.usedRouting);
 this.churns[2] = new NEW_CLASS();
 this.usedChurn = this.churns[CCNUtil.ccn_churn_enable];
 ~~~
+
+# Copyright
+
+see [LICENSE](https://github.com/ncl-teu/ncl_ccnsim/blob/master/LICENSE)
+
+Copyright (c) 2019 Hidehiro Kanemitsu <kanemitsuh@stf.teu.ac.jp>
