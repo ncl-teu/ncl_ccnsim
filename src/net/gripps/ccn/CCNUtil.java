@@ -150,6 +150,8 @@ public class CCNUtil extends CloudUtil {
 
     public static double dist_fib_duplicate_mu;
 
+    public static  long ccn_chord_pit_threshold;
+
 
 
 
@@ -257,6 +259,8 @@ public class CCNUtil extends CloudUtil {
             CCNUtil.ccn_fib_duplicate_num_max = Integer.valueOf(CCNUtil.prop.getProperty("ccn_fib_duplicate_num_max"));
 
             CCNUtil.dist_fib_duplicate_mu = Double.valueOf(CCNUtil.prop.getProperty("dist_fib_duplicate_mu")).doubleValue();
+
+            CCNUtil.ccn_chord_pit_threshold = Long.valueOf(CCNUtil.prop.getProperty("ccn_chord_pit_threshold"));
         } catch (Exception e) {
             e.printStackTrace();
         }
