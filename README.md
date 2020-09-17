@@ -45,7 +45,7 @@ this.usedCaching = this.cachings[CCNUtil.ccn_caching_no];
 - Currently, we have **ChordDHTRouting**, **ChordDHTBARouging(Chord with Barabasi-Albert Network)**, and **LongestMatchRouting**. 
 ## How to create a new routing algorithm
 1. In ccn.properties, please set `ccn_routing_no=0` to `ccn_routing_no=1`(i.e., change the used index no). And please set `ccn_routing_allnum=1` to `ccn_routing_allnum=2` (i.e., increment it as the number of candidate caching algorithms). 
-2. In `net.gripps.ccn.process.CCNMgr' and `net.gripps.ccn.core.AbstractNode`, please change as follows: 
+2. In `net.gripps.ccn.process.CCNMgr` and `net.gripps.ccn.core.AbstractNode`, please change as follows: 
 
 Before: 
 ~~~
