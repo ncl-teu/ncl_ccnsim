@@ -167,6 +167,8 @@ public class CCNRouter extends AbstractNode {
                     InterestPacket p = this.interestQueue.poll();
                     //そして中身を見る．
                     this.processInterest(p);
+                    //LinkedList<Face> fList = this.getFIBEntry().getTable().get("/");
+
 
                 } else {
                     //Interestパケットがこなければ，何もしない．
@@ -260,6 +262,38 @@ public class CCNRouter extends AbstractNode {
                                 }
                                 //ルータへデータを転送
                                 router.forwardData(c);
+
+                                //bwが最大のルータを選ぶ
+                                //自信のfaceリストを取得する。
+                                //fIte2に現在のfaceのリストを入れる
+                                Iterator<Face> fIte2 = this.getFace_routerMap().values().iterator();
+                                //どの帯域幅が一番大きいか決定するやつ
+                                long maxBW = -1;
+                                CCNRouter maxBWRouter = router;
+                                //maxBWRouterをnullじゃなくしてエラーを防ぐコード。データサイズを指定してなにかする。
+
+                                //fIte2がなくなるまで繰り返す
+                                while(fIte2.hasNext()){
+                                    //faceにスペース区切りでfIte2を入れていく
+                                    Face face = fIte2.next();
+                                    //ルータを取得する。
+                                    //dRouterにfaceの宛先IDを入れていく
+                                    CCNRouter dRouter = CCNMgr.getIns().getRouterMap().get(face.getPointerID());
+                                    //ルータの帯域幅を取得する。
+                                    //bwに先ほどのIDの帯域幅を入れ、一番大きいならmaxBW,maxBWRouterに設定する
+                                    long bw = dRouter.getBw();
+                                    // pitのテーブルを取得する
+                                    PIT pit=dRouter.getPITEntry();
+
+                                    if(bw >= maxBW && pit.getTable().size()<=1){
+                                        maxBW = bw;
+                                        maxBWRouter = dRouter;
+                                    }
+
+                                //最も帯域幅が大きいコンテンツストアにコンテンツのprefixとコンテンツをキャッシュさせる    }
+                                }
+                                //最も帯域幅が大きいコンテンツストアにコンテンツのprefixとコンテンツをキャッシュさせる
+                                maxBWRouter.getCSEntry().getCacheMap().put(c.getPrefix(), c);
                             }
 
                         }
