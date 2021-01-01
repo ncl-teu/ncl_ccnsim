@@ -53,6 +53,11 @@ public class CCNMgr implements Runnable{
 
     private BaseChurnResilienceAlgorithm usedChurn;
 
+    private HashMap<String, CCNContents> updatedMap;
+
+    private boolean isDBMode;
+
+
 
 
     //private LinkedBlockingQueue<InterestPacket> reqQueue;
@@ -82,6 +87,8 @@ public class CCNMgr implements Runnable{
      *
      */
     private CCNMgr(){
+        this.updatedMap = new HashMap<String, CCNContents>();
+        this.isDBMode = true;
         this.maxInterestID = 0;
         this.nodeMap = new HashMap<Long, CCNNode>();
         this.routerMap = new HashMap<Long, CCNRouter>();
@@ -113,6 +120,24 @@ public class CCNMgr implements Runnable{
         this.buildFIB();
 
 
+    }
+
+
+
+    public boolean isDBMode() {
+        return isDBMode;
+    }
+
+    public void setDBMode(boolean DBMode) {
+        isDBMode = DBMode;
+    }
+
+    public HashMap<String, CCNContents> getUpdatedMap() {
+        return updatedMap;
+    }
+
+    public void setUpdatedMap(HashMap<String, CCNContents> updatedMap) {
+        this.updatedMap = updatedMap;
     }
 
     /**
@@ -364,7 +389,7 @@ public class CCNMgr implements Runnable{
                     //0以外であれば，乱数を生成する．
                     if(id == 0){
                         long id2 = CCNUtil.genLong(1, CCNUtil.ccn_router_num-1);
-                        //もしすでにFaceにあるのなら，coneinue
+                        //もしすでにFaceにあるのなら，continue
                         if(r.containsIDinRouterFaceMap(new Long(id2))){
                             continue;
                         }else{
@@ -390,7 +415,7 @@ public class CCNMgr implements Runnable{
 
                         }
 
-                        //もしすでにFaceにあるのなら，coneinue
+                        //もしすでにFaceにあるのなら，continue
                         if(r.containsIDinRouterFaceMap(id2)){
 
                             continue;

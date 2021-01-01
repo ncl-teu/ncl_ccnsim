@@ -108,6 +108,10 @@ public class CCNUtil extends CloudUtil {
 
     public static long MINUS_VAUE = -1;
 
+    //public static long PIUS_VAUE = +1;
+    public static long MINValue;
+
+
     public static long ccn_hop_per_delay;
 
     public static double ccn_actual_data_rate;
@@ -153,6 +157,14 @@ public class CCNUtil extends CloudUtil {
     public static  long ccn_chord_pit_threshold;
 
 
+
+    public static double ccn_update_exp_dist_lambda_min;
+
+    public static double ccn_update_exp_dist_lambda_max;
+
+    public static long ccn_content_update_interval;
+
+    public static int ccn_db_hop;
 
 
     private CCNUtil() {
@@ -261,6 +273,14 @@ public class CCNUtil extends CloudUtil {
             CCNUtil.dist_fib_duplicate_mu = Double.valueOf(CCNUtil.prop.getProperty("dist_fib_duplicate_mu")).doubleValue();
 
             CCNUtil.ccn_chord_pit_threshold = Long.valueOf(CCNUtil.prop.getProperty("ccn_chord_pit_threshold"));
+
+            CCNUtil.ccn_update_exp_dist_lambda_max = Double.valueOf(CCNUtil.prop.getProperty("ccn_update_exp_dist_lambda_max")).doubleValue();
+
+            CCNUtil.ccn_update_exp_dist_lambda_min = Double.valueOf(CCNUtil.prop.getProperty("ccn_update_exp_dist_lambda_min")).doubleValue();
+
+            CCNUtil.ccn_content_update_interval = Long.valueOf(CCNUtil.prop.getProperty("ccn_content_update_interval")).longValue();
+
+            CCNUtil.ccn_db_hop = Integer.valueOf(CCNUtil.prop.getProperty("ccn_db_hop")).intValue();
         } catch (Exception e) {
             e.printStackTrace();
         }

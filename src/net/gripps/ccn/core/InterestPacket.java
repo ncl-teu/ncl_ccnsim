@@ -50,6 +50,12 @@ public class InterestPacket {
      */
     LinkedList<ForwardHistory> historyList;
 
+    /**
+     * 分散データベースモード
+     *
+     */
+    boolean isDBMode;
+
     public InterestPacket(String prefix, Long ID, long length, Long fromNodeId, long count, LinkedList<ForwardHistory> historyList) {
         this.prefix = prefix;
         this.ID = ID;
@@ -59,8 +65,16 @@ public class InterestPacket {
         this.historyList = historyList;
         this.minBW = CCNUtil.MAXValue;
         this.isForwardedByBC = false;
+        this.isDBMode = false;
     }
 
+    public boolean isDBMode() {
+        return isDBMode;
+    }
+
+    public void setDBMode(boolean DBMode) {
+        isDBMode = DBMode;
+    }
 
     public long getMinBW() {
         return minBW;

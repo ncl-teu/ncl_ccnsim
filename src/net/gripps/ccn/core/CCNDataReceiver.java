@@ -79,9 +79,13 @@ public class CCNDataReceiver implements Runnable{
                         //リストを更新
                         LinkedList<ForwardHistory> fList = c.getHistoryList();
 
+                        //fList.add();
+
                         fList.getLast().setArrivalTime(System.currentTimeMillis());
                         this.contentsQueue.offer(info.getContents());
                         ForwardHistory last = c.getHistoryList().getLast();
+
+
 
                         //宛先がノードであれば，最終地点である．
                         if(last.getToType() == CCNUtil.NODETYPE_NODE){

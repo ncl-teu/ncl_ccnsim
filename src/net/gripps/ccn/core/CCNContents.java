@@ -115,6 +115,12 @@ public class CCNContents implements Serializable, Cloneable{
     private Boolean  isIPUsed;
 
 
+    /**
+     * 更新時刻
+     */
+    private long updatedTime;
+
+
 
 
     /**
@@ -151,6 +157,7 @@ public class CCNContents implements Serializable, Cloneable{
         this.isBC = false;
 
         this.isIPUsed = false;
+        this.updatedTime = -1;
     }
 
     public boolean isIPUsed() {
@@ -176,6 +183,14 @@ public class CCNContents implements Serializable, Cloneable{
     public long getLifeTimeAtSrc(){
         long currentTime = System.currentTimeMillis();
         return currentTime - this.generatedTimeAtSrc;
+    }
+
+    public long getUpdatedTime() {
+        return updatedTime;
+    }
+
+    public void setUpdatedTime(long updatedTime) {
+        this.updatedTime = updatedTime;
     }
 
     /**

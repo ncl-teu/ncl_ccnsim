@@ -10,11 +10,13 @@ import net.gripps.ccn.caching.BaseCachingAlgorithm;
 import net.gripps.ccn.caching.NoCaching;
 import net.gripps.ccn.caching.OnPathCaching;
 import net.gripps.ccn.caching.OnPathPlus;
+import net.gripps.ccn.fibrouting.ChordDHTRouting;
 import net.gripps.ccn.process.CCNMgr;
 
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -156,12 +158,155 @@ public class CCNRouter extends AbstractNode {
     @Override
     public void run() {
         try {
+            long dcount = 0;
             /**
              * パケットを転送するためのループ
              */
             while (true) {
                 //  System.out.println("RouterID:"+this.routerID);
                 Thread.sleep(100);
+
+                if(!this.CSEntry.getCacheMap().isEmpty()){
+                    // System.out.println(dcount);
+                    dcount += 100;
+                    if(dcount >= CCNUtil.ccn_content_update_interval){
+                        dcount = 0;
+                        //キャッシュコンテンツの更新をする
+                        //1つのキャッシュコンテンツのイテレータを選択する
+                        Iterator<CCNContents> cIte = this.CSEntry.getCacheMap().values().iterator();
+                        int len = this.CSEntry.getCacheMap().size();
+                        //更新対象のインデックス値をランダムで選択する。
+                        int targetIDX = CCNUtil.genInt(0, len-1);
+                        int idx = 0;
+                        CCNContents targetContents = null;
+                        while(cIte.hasNext()){
+                            CCNContents c = cIte.next();
+                            if(targetIDX == idx){
+                                //ランダム値とidxが等しければ、そいつを選択する。
+                                targetContents = c;
+                                break;
+                            }
+
+                            idx++;
+                        }
+                        //targetコンテンツのファイル名前を更新する。
+                        //targetコンテンツのprefixを更新する。
+                        String oldPrefix = targetContents.getPrefix();
+
+
+
+
+                        //ディープコピーして複製する。
+                        //CCNContents updateContents = (CCNContents)targetContents.deepCopy();
+                        //CSEntryから、古いコンテンツを削除する
+                        //this.CSEntry.getCacheMap().remove(oldPrefix);
+
+                        //oldPrefixのコンテンツを持つルータたちに、、そのコンテンツ削除＋FIBにおいて、自分にinterstが転送されるように
+                        //FIBへ追加する
+
+                        //UUID newUUID = UUID.randomUUID();
+                        //String newPrefix  = newUUID.toString();
+                        //updateContents.setPrefix(newPrefix);
+                        //更新後のコンテンツを追加する
+                        //this.CSEntry.getCacheMap().put(newPrefix, updateContents);
+                        //更新したコンテンツを登録する。既にあったら、更新しない。
+                        if(CCNMgr.getIns().getUpdatedMap().containsKey(oldPrefix)){
+                            //次のループへ
+                            continue;
+                        }
+
+                        //更新時刻を設定する。
+                        long updateTime = System.currentTimeMillis();
+                        targetContents.setUpdatedTime(updateTime);
+                        //
+                        CCNMgr.getIns().getUpdatedMap().put(oldPrefix, targetContents);
+                        System.out.println("*****更新したぜ "+oldPrefix);
+
+                        //まずは、FIBを見て、prefixに完全一致するfaceリストすべてに対して更新依頼を送る。
+                        //次に、fingerTableにおいて、prefixより大きいもの、小さいもののうちで最小の距離
+                        //なfaceに対して、interest（更新依頼）を送る。
+
+                        //FIBの取得
+                        HashMap<String, LinkedList<Face>> FIB = this.getFIBEntry().getTable();
+                        //FIBから、prefixに完全一致するものを選ぶ。
+                        //もし完全一致するものがあればの話。
+                        if(FIB.containsKey(oldPrefix)){
+                            LinkedList<ForwardHistory> tList = new LinkedList<ForwardHistory>();
+                            //対象となるfaceリストを取得する。
+                            LinkedList<Face> fList = FIB.get(oldPrefix);
+                            //あとは、各faceすべて（ただしルータ）に対してinterestパケットを送る。
+                            Iterator<Face> fIte = fList.iterator();
+                            while(fIte.hasNext()){
+                                Face face = fIte.next();
+                                if(face.getType() == CCNUtil.NODETYPE_ROUTER){
+                                    ForwardHistory h = new ForwardHistory(this.getRouterID(), CCNUtil.NODETYPE_ROUTER,
+                                            (long)face.getPointerID(), CCNUtil.NODETYPE_ROUTER, System.currentTimeMillis(), -1);
+                                    //転送履歴に転送情報を追加する。
+                                    tList.add(h);
+                                    //宛先がルータのときだけinterestを転送する。
+                                    InterestPacket p = new InterestPacket(oldPrefix, new Long(0), 1500, this.getRouterID(), 1, tList);
+                                    p.setDBMode(true);
+                                    //宛先ルータの取得
+                                    CCNRouter targetRouter = CCNMgr.getIns().getRouterMap().get(face.getPointerID());
+                                    //ルータへinterestパケットを転送する
+                                    this.forwardInterest(face, p);
+
+                                }else{
+
+                                }
+                            }
+                        }else{
+                            //無ければ何もしない
+                        }
+                        if(CCNMgr.getIns().isDBMode()) {
+                            //次に、fingerテーブルの中から、+/-でprefixに最も近いところへinterestを送る。
+                            //ChordDHTRouting独自のメソッドを使うために、キャストする。
+                            ChordDHTRouting chord = (ChordDHTRouting) this.usedRouting;
+                            long hid = chord.calcHashCode(oldPrefix.toString().hashCode());
+                            //prefixのIDより大きいなかで、最も小さいIDのルータを選択
+                            Long sucID = chord.getSucRouter(this.getFace_routerMap().values().iterator(), hid);
+                            //そのfaceを取得
+                            Face sucFace = this.findFaceByID(sucID, this.getFace_routerMap());
+
+                            LinkedList<ForwardHistory> tList = new LinkedList<ForwardHistory>();
+
+                            //forwardInteretをする。
+                            ForwardHistory h = new ForwardHistory(this.getRouterID(), CCNUtil.NODETYPE_ROUTER,
+                                    (long) sucFace.getPointerID(), CCNUtil.NODETYPE_ROUTER, System.currentTimeMillis(), -1);
+                            //転送履歴に転送情報を追加する。
+                            tList.add(h);
+                            //宛先がルータのときだけinterestを転送する。
+                            InterestPacket p = new InterestPacket(oldPrefix, new Long(0), 1500, this.getRouterID(), 1, tList);
+                            p.setDBMode(true);
+                            //あとは、転送。
+                            this.forwardInterest(sucFace, p);
+
+
+                            //prefixのIDより小さいなかで、最も小さいIDのルータを選択
+                            Long predID = chord.getPredRouter(this.getFace_routerMap().values().iterator(), hid);
+
+
+                            //faceを取得？
+                            Face predFace = this.findFaceByID(predID, this.getFace_routerMap());
+                            LinkedList<ForwardHistory> nList = new LinkedList<ForwardHistory>();
+
+                            //forwardInterestをする？
+                            ForwardHistory j = new ForwardHistory(this.getRouterID(), CCNUtil.NODETYPE_ROUTER,
+                                    (long) predFace.getPointerID(), CCNUtil.NODETYPE_ROUTER, System.currentTimeMillis(), -1);
+                            //転送履歴に転送情報を追加
+                            nList.add(j);
+
+                            //宛先がルータのときだけinterestを転送
+                            InterestPacket o = new InterestPacket(oldPrefix, new Long(0), 1500, this.getRouterID(), 1, nList);
+                            o.setDBMode(true);
+
+                            //あとは転送
+                            this.forwardInterest(predFace, o);
+
+                        }
+                    }
+                }
+
                 if (!this.interestQueue.isEmpty()) {
                     //InterestPacketを取り出す．
                     InterestPacket p = this.interestQueue.poll();
@@ -386,50 +531,91 @@ public class CCNRouter extends AbstractNode {
 
         //もしCSにあれば，データを返す．
         if (this.CSEntry.getCacheMap().containsKey(p.getPrefix())) {
+
             CCNContents c = this.CSEntry.getCacheMap().get(p.getPrefix());
             c.setCache(true);
+            //DBモードの場合の処理
+            if (p.isDBMode()) {
+                //もしupdatedMapにあれば
 
-            //最新の履歴を見て，送信もとを特定する．
-            if (h.getFromType() == CCNUtil.NODETYPE_ROUTER) {
-                //ルータならば，ルータへCCNContentsを送る．
-                CCNRouter r = findCCNRouterFromFaceList(toID);
-                if(r == null){
-                    CCNLog.getIns().log(",1,"+p.getPrefix()+",-"+","+fList.getFirst().getStartTime()+","+ fList.getLast().getArrivalTime()+","+
-                            (fList.getLast().getArrivalTime()-fList.getFirst().getStartTime())+","+
-                            p.getHistoryList().getFirst().getFromID()+",-"+","+fList.size()+",-"+","+"x"+","+"-");
+                //まずはキャッシュを消す
+                CCNContents zakicontent = CCNMgr.getIns().getUpdatedMap().get(p.getPrefix());
+                //時刻チェック
+                //古い場合はダメ。
+
+                //nullpointerexceptionが出た部分
+                if (zakicontent != null && c.getUpdatedTime() < zakicontent.getUpdatedTime()) {
+                    CCNLog.getIns().log(",14," + p.getPrefix() + ",-" + "," + fList.getFirst().getStartTime() + "," + fList.getLast().getArrivalTime() + "," +
+                            (fList.getLast().getArrivalTime() - fList.getFirst().getStartTime()) + "," +
+                            p.getHistoryList().getFirst().getFromID() + "," + this.getRouterID() + "," + fList.size() + ",-" + "," + "△" + "," + "-");
+
+                    this.CSEntry.getCacheMap().remove(p.getPrefix());
+
+                    //そして、FIBに、prefixを追加する
+                    Long originID = p.getHistoryList().getFirst().getFromID();
+                    Face newFace = new Face(null, originID, CCNUtil.NODETYPE_ROUTER);
+                    this.getFIBEntry().addFace(p.getPrefix(), newFace);
+                    //そして、returnして終わり。
                     return;
                 }
-                c.getHistoryList().clear();
-                // CCNContents c = this.CSEntry.getCacheMap().get(p.getPrefix());
-                //後は送信処理だが，分割して送る？
-                // System.out.println("<CS内キャッシュを要求元ルータへ返送> from " + "Router" + this.routerID + "-->" + "Router" + toID + " for prefix:" + p.getPrefix());
-                ForwardHistory f = new ForwardHistory(this.routerID, CCNUtil.NODETYPE_ROUTER, r.getRouterID(), CCNUtil.NODETYPE_ROUTER,
-                        System.currentTimeMillis(), -1);
-                c.getHistoryList().add(f);
-                r.forwardData(c);
-                //this.getPITEntry().removeByKey(p.getPrefix());
-                CCNLog.getIns().log(",13,"+p.getPrefix()+",-"+","+fList.getFirst().getStartTime()+","+ fList.getLast().getArrivalTime()+","+
-                        (fList.getLast().getArrivalTime()-fList.getFirst().getStartTime())+","+
-                        p.getHistoryList().getFirst().getFromID()+","+this.getRouterID()+","+fList.size()+",-"+","+"o"+","+"-");
-
 
             } else {
-                // System.out.println("<CS内キャッシュを要求元ノードへ返送> from " + "Router" + this.routerID + "-->" + "Node" + toID + " for prefix:" + p.getPrefix());
-                CCNNode n = CCNMgr.getIns().getNodeMap().get(toID);
-                //System.out.println("要求元ノードへデータ到着:@"+ c.getPrefix());
-                ForwardHistory f = new ForwardHistory(this.routerID, CCNUtil.NODETYPE_ROUTER, n.getNodeID(), CCNUtil.NODETYPE_NODE,
-                        System.currentTimeMillis(), -1);
-                c.getHistoryList().add(f);
-                n.forwardData(c);
-                CCNLog.getIns().log(",13,"+p.getPrefix()+",-"+","+fList.getFirst().getStartTime()+","+ fList.getLast().getArrivalTime()+","+
-                        (fList.getLast().getArrivalTime()-fList.getFirst().getStartTime())+","+
-                        p.getHistoryList().getFirst().getFromID()+","+this.getRouterID()+","+fList.size()+",-"+","+"o"+","+"-");
+
+                //最新の履歴を見て，送信もとを特定する．
+                if (h.getFromType() == CCNUtil.NODETYPE_ROUTER) {
+                    //ルータならば，ルータへCCNContentsを送る．
+                    CCNRouter r = findCCNRouterFromFaceList(toID);
+                    if (r == null) {
+                        CCNLog.getIns().log(",1," + p.getPrefix() + ",-" + "," + fList.getFirst().getStartTime() + "," + fList.getLast().getArrivalTime() + "," +
+                                (fList.getLast().getArrivalTime() - fList.getFirst().getStartTime()) + "," +
+                                p.getHistoryList().getFirst().getFromID() + ",-" + "," + fList.size() + ",-" + "," + "x" + "," + "-");
+                        return;
+                    }
+                    c.getHistoryList().clear();
+                    // CCNContents c = this.CSEntry.getCacheMap().get(p.getPrefix());
+                    //後は送信処理だが，分割して送る？
+                    // System.out.println("<CS内キャッシュを要求元ルータへ返送> from " + "Router" + this.routerID + "-->" + "Router" + toID + " for prefix:" + p.getPrefix());
+
+                    //取得コンテンツが、新しいかどうかのチェック
+                    CCNContents zakicontent = CCNMgr.getIns().getUpdatedMap().get(p.getPrefix());
+                    //時刻チェック
+                    //古い場合はダメ。
+
+                    if (zakicontent != null && c.getUpdatedTime() < zakicontent.getUpdatedTime()) {
+                        CCNLog.getIns().log(",13," + p.getPrefix() + ",-" + "," + fList.getFirst().getStartTime() + "," + fList.getLast().getArrivalTime() + "," +
+                                (fList.getLast().getArrivalTime() - fList.getFirst().getStartTime()) + "," +
+                                p.getHistoryList().getFirst().getFromID() + "," + this.getRouterID() + "," + fList.size() + ",-" + "," + "x" + "," + "-");
+
+                        return;
+                    } else {
+                        ForwardHistory f = new ForwardHistory(this.routerID, CCNUtil.NODETYPE_ROUTER, r.getRouterID(), CCNUtil.NODETYPE_ROUTER,
+                                System.currentTimeMillis(), -1);
+                        c.getHistoryList().add(f);
+                        r.forwardData(c);
+                        //this.getPITEntry().removeByKey(p.getPrefix());
+                        CCNLog.getIns().log(",13," + p.getPrefix() + ",-" + "," + fList.getFirst().getStartTime() + "," + fList.getLast().getArrivalTime() + "," +
+                                (fList.getLast().getArrivalTime() - fList.getFirst().getStartTime()) + "," +
+                                p.getHistoryList().getFirst().getFromID() + "," + this.getRouterID() + "," + fList.size() + ",-" + "," + "o" + "," + "-");
+
+                    }
+
+                } else {
+
+                    // System.out.println("<CS内キャッシュを要求元ノードへ返送> from " + "Router" + this.routerID + "-->" + "Node" + toID + " for prefix:" + p.getPrefix());
+                    CCNNode n = CCNMgr.getIns().getNodeMap().get(toID);
+                    //System.out.println("要求元ノードへデータ到着:@"+ c.getPrefix());
+                    ForwardHistory f = new ForwardHistory(this.routerID, CCNUtil.NODETYPE_ROUTER, n.getNodeID(), CCNUtil.NODETYPE_NODE,
+                            System.currentTimeMillis(), -1);
+                    c.getHistoryList().add(f);
+                    n.forwardData(c);
+                    CCNLog.getIns().log(",13," + p.getPrefix() + ",-" + "," + fList.getFirst().getStartTime() + "," + fList.getLast().getArrivalTime() + "," +
+                            (fList.getLast().getArrivalTime() - fList.getFirst().getStartTime()) + "," +
+                            p.getHistoryList().getFirst().getFromID() + "," + this.getRouterID() + "," + fList.size() + ",-" + "," + "o" + "," + "-");
 
 
+                }
             }
-            //自身のprocessContents
-            //this.processContents(c);
-        } else {
+        }else {
             //CSになければ，PITを見る．
             boolean isNotFound = false;
             //PITへの反映

@@ -1,1021 +1,1179 @@
-package org.ncl.workflow.engine;
-
-import net.gripps.cloud.core.VM;
-import net.gripps.cloud.nfv.NFVEnvironment;
-import net.gripps.cloud.nfv.sfc.SFC;
-import net.gripps.cloud.nfv.sfc.VNF;
-import net.gripps.clustering.common.aplmodel.CustomIDSet;
-import org.apache.commons.net.ftp.FTP;
-import org.apache.commons.net.ftp.FTPClient;
-import org.apache.commons.net.ftp.FTPReply;
-import org.ncl.workflow.comm.*;
-import org.ncl.workflow.util.NCLWUtil;
-
-import java.io.*;
-import java.nio.charset.Charset;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.StringTokenizer;
-
-/**
- * Created by Hidehiro Kanemitsu on 2019/05/04.
- * Receives the input data from a receiveThread.
- */
-public class Task implements Serializable, Runnable {
-
-    /**
-     * ID of the job including this task.
-     */
-    private long jobID;
-
-    /**
-     * ID of this task.
-     */
-    private long taskID;
-
-    /**
-     * String of the command.
-     */
-    private String cmd;
-
-    /**
-     * Additional arguments which is determined depending on
-     * the dynamics of the system.
-     */
-    private String[] args;
-
-    /**
-     * Output file path of the executable command.
-     */
-    private LinkedList<FileSendInfo> outFileInfoList;
-
-    /**
-     * Output message(i.e., values) of the command.
-     */
-    private DataSendInfo outDataInfo;
-
-    /**
-     * Immediate predecessor task IDs.
-     */
-    // private LinkedList<Long> fromTaskList;
-
-    /**
-     * Immediate successor task IDs.
-     */
-    //private LinkedList<Long> toTaskList;
-
-    /**
-     * Actual start time of the task.
-     */
-    private long startTime;
-
-    /**
-     * Actual completion time of the task.
-     */
-    private long completionTime;
-
-    /**
-     * assignment target ID.
-     * vCPU level ID.
-     */
-    private String targetID;
-
-    private HashMap<Long, NCLWData> inDataMap;
-
-    private HashMap<Long, NCLWData> outDataMap;
-
-    private CustomIDSet portSet;
-
-    /**
-     * Referencial VNF to monitor the number of
-     * input data/ outpu t data.
-     */
-    private VNF vnf;
-
-    private SFC sfc;
-
-    private NFVEnvironment env;
-
-    private WorkflowJob job;
-
-    private boolean isStarted;
-
-    private boolean isFinished;
-
-    //private int arrivedCnt;
-
-
-    public Task(long jobID, long taskID, String cmd,
-                LinkedList<FileSendInfo> oFIL, DataSendInfo oDSI, LinkedList<Long> fromTaskList, LinkedList<Long> toTaskList, String targetID) {
-        this.jobID = jobID;
-        this.taskID = taskID;
-        this.cmd = cmd;
-        this.outFileInfoList = oFIL;
-        this.outDataInfo = oDSI;
-        // this.fromTaskList = fromTaskList;
-        //   this.toTaskList = toTaskList;
-        this.targetID = targetID;
-        this.inDataMap = new HashMap<Long, NCLWData>();
-        this.outDataMap = new HashMap<Long, NCLWData>();
-        this.portSet = new CustomIDSet();
-        this.isStarted = false;
-        this.isFinished = false;
-        //this.arrivedCnt = 0;
-        //  this.sfc = in_sfc;
-        //  this.env = in_env;
-
-
-    }
-
-
-    /**
-     * Add new input data.
-     * @param data
-     * @return
-     */
-    /*public boolean putInData(NCLWData data){
-        if(this.fromTaskList.contains(data.getFromTaskID())){
-            this.inDataMap.put(data.getFromTaskID(), data);
-            return true;
-        }else{
-            return false;
-        }
-    }*/
-
-    /**
-     * Analyze the command with variables and returns the actual command.
-     * Format: "java -class $F^12 $V^34 $F^12 $F^33 $V^45 poliy";
-     *
-     * @param cmd
-     * @return
-     */
-    public LinkedList<String> createCompleteCmd(String cmd) {
-        StringTokenizer st1 = new StringTokenizer(cmd, " ");
-        LinkedList<String> retCmd = new LinkedList<String>();
-
-        while (st1.hasMoreTokens()) {
-            String str = st1.nextToken();
-            if (str.length() < 3) {
-                retCmd.add(str);
-                continue;
-            }
-            String headStr = str.substring(0, 3);
-
-
-            if (headStr.equals("$F^")) {
-                long taskID = Long.valueOf(str.substring(3));
-                NCLWData inData = this.inDataMap.get(taskID);
-                //outFile is specified.
-                String inFile = inData.getWriteFilePath();
-
-                cmd = cmd.replace(str, inFile);
-                retCmd.add(inFile);
-
-
-            } else if (headStr.equals("$V^")) {
-                long taskID = Long.valueOf(str.substring(3));
-                NCLWData inData = this.inDataMap.get(taskID);
-                //outFile is specified.
-                String inValue = inData.getMsg();
-                cmd = cmd.replace(str, inValue);
-                retCmd.add(inValue);
-            } else if (headStr.equals("$R^")) {
-                //Obtain file from FTP server.
-                String filePath = str.substring(3);
-                cmd = cmd.replace(str, filePath);
-                File file = new File(filePath);
-                if(!file.exists()){
-                    //Get the file via FTP.
-                    this.getFileByFTP(filePath);
-                }else{
-                }
-                retCmd.add(filePath);
-
-
-
-            } else {
-                retCmd.add(str);
-            }
-        }
-
-        return retCmd;
-    }
-
-    public void getFileByFTP(String filePath) {
-        FileOutputStream os = null;
-        File  file = new File(filePath);
-
-
-        FTPClient fp = new FTPClient();
-        FileInputStream is = null;
-        try {
-
-            fp.connect(NCLWUtil.ftp_server_ip);
-            if (!FTPReply.isPositiveCompletion(fp.getReplyCode())) { // コネクトできたか？
-                System.out.println("connection failed");
-                System.exit(1); // 異常終了
-            }
-
-            if (fp.login(NCLWUtil.ftp_server_id, NCLWUtil.ftp_server_pass) == false) { // ログインできたか？
-                System.out.println("***FTP login failed****");
-                System.exit(1); // 異常終了
-            }
-            fp.setFileType(FTP.BINARY_FILE_TYPE);
-// ファイル受信
-            if(!(file.getParent() == null)){
-                File dir = new File(file.getParent());
-                if(!dir.exists()){
-                    dir.mkdirs();
-                }
-            }
-
-            os = new FileOutputStream(filePath);// Client side
-            String serverPath = "/"+NCLWUtil.ftp_server_homedirName + "/"+this.getJobID() + "/"+file.getName();
-
-
-            fp.retrieveFile(serverPath, os);// サーバー側
-            os.close();
-            System.out.println("FTP GET COMPLETED");
-
-
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            try{
-                fp.disconnect();
-
-                os.close();
-            }catch(Exception e){
-                e.printStackTrace();
-            }
-
-
-        }
-    }
-
-    @Override
-    public void run() {
-        System.out.println("Task:" + this.getTaskID() + "started");
-        this.setStarted(true);
-        int inDegree = this.vnf.getDpredList().size();
-        //System.out.println("InDegree:"+ inDegree);
-
-        try {
-            while (true) {
-                Thread.sleep(100);
-                //Thread.sleep(3000);
-                if (this.inDataMap.size() == inDegree) {
-               // if(this.arrivedCnt == inDegree){
-                    System.out.println("All input data arrived @ Task" + this.getTaskID());
-                    //obtain all input data from the hashMap.
-                    //command format "xxxxxx  $F^23 $V^23 $F^12 xxxx"
-                    //$[File Flag][From Task ID] or $[Value Flag][From Task ID]
-                    //analyze the command.
-                    LinkedList<String> actualCmd = this.createCompleteCmd(this.cmd);
-                    System.out.println("cmd:" + actualCmd + "@" + this.getTaskID());
-
-                    // Runtime.getRuntime().exec(actualCmd);
-                    ProcessBuilder builder = new ProcessBuilder(actualCmd);
-                    //builder.inheritIO();
-                    //Execute the task.
-                    Process process = builder.start();
-
-                    int code =  process.waitFor();
-                    //process.destroy();
-                    //Obtain the results regarding normal / error.
-                    InputStream stream = process.getErrorStream();
-
-                    BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream(), Charset.defaultCharset()));
-                    BufferedReader r2 = new BufferedReader(new InputStreamReader(stream, Charset.defaultCharset()));
-                    StringBuffer retBuf = new StringBuffer();
-                    process.waitFor();
-
-                    String line_normal;
-                    String line_error;
-                    while ((line_normal = r.readLine()) != null) {
-                        retBuf.append(line_normal);
-                    }
-
-                    while ((line_error = r2.readLine()) != null) {
-                        retBuf.append(line_error);
-                    }
-
-                    //int result = process.exitValue();
-                    // if (result == 0) {
-
-                    if (!process.isAlive()) {
-
-
-                       /* try{
-                            Thread.sleep(3000);
-                        }catch(Exception e){
-                            e.printStackTrace();
-                        }
-
-                        */
-
-                        //Normal Termination. Thus, the process tries to
-                        //get retultant data.
-                        //File transfer process.
-                        if (this.outFileInfoList.size() > 0) {
-                            Iterator<FileSendInfo> fIte = this.outFileInfoList.iterator();
-
-                            //per file loop
-                            while (fIte.hasNext()) {
-                                FileSendInfo fsi = fIte.next();
-                                File file = new File(fsi.getPath());
-                                System.out.println("FileName:"+file.getPath() + "/Size:"+file.length());
-                                while(!file.exists()|| file.length()==0){
-                                    Thread.sleep(100);
-                                }
-                                process.destroyForcibly();
-                                if (this.isEndVNF()) {
-                                    NCLWData data = new NCLWData(fsi.getPath(), fsi.getWritePath(), this.getTaskID(), -1, NCLWUtil.delegator_ip,
-                                            true, NCLWUtil.port);
-                                    data.setSfc(this.sfc);
-                                    data.setJob(this.job);
-                                    data.setEnv(this.env);
-                                    if (file.exists()) {
-                                        data.setFile(file);
-
-                                    }
-
-                                    SendThread sender = new SendThread();
-                                    Thread sendThread = new Thread(sender);
-                                    //NCLWEngine.getIns().getExec().submit(sender);
-                                    sendThread.start();
-                                    sender.getDataQueue().add(data);
-                                    System.out.println("outFile Sent : task" + this.vnf.getIDVector().get(1) + "@" + this.vnf.getvCPUID() + "->@delegator");
-                                    break;
-                                }
-                                //per target task loop
-                                Iterator<Long> fsiIte = fsi.getTargetTaskIDList().iterator();
-                                while (fsiIte.hasNext()) {
-                                    Long targetID = fsiIte.next();
-                                    int portNumber = NCLWUtil.port;
-                                    this.portSet.add(Long.valueOf(portNumber));
-                                    //Get the IP address of the target node.
-
-
-                                    VNF sucVNF = this.sfc.findVNFByLastID(targetID);
-                                    String sucVCPUID = sucVNF.getvCPUID();
-                                    VM host = NCLWUtil.findVM(this.env, sucVCPUID);
-
-
-                                    //String ipAddr =;
-                                    NCLWData data = new NCLWData(fsi.getPath(), fsi.getWritePath(), this.getTaskID(), targetID, host.getIpAddr(),
-                                            true, portNumber);
-                                    data.setSfc(this.sfc);
-                                    data.setJob(this.job);
-                                    data.setEnv(this.env);
-                                    if (file.exists()) {
-                                        data.setFile(file);
-
-                                    }
-
-                                    SendThread sender = new SendThread();
-                                    Thread sendThread = new Thread(sender);
-                                    //NCLWEngine.getIns().getExec().submit(sender);
-                                    sendThread.start();
-                                    sender.getDataQueue().add(data);
-                                    System.out.println("outFile Sent : task" + this.vnf.getIDVector().get(1) + "@" + this.vnf.getvCPUID() + "->" + "task" + targetID + "@" + sucVCPUID);
-
-
-                                }
-
-
-                            }
-
-                        }
-
-                        //Data transfer process
-                        if (this.outDataInfo != null) {
-
-                            //prepare for sending the output message
-                            String msg = this.outDataInfo.getMsg();
-                            Iterator<Long> targetIDIte = this.outDataInfo.getTargetIDList().iterator();
-                            while (targetIDIte.hasNext()) {
-                                Long targetTaskID = targetIDIte.next();
-                                int portNumber = NCLWUtil.port;
-                                this.portSet.add(Long.valueOf(portNumber));
-                                //Get the IP address of the target node.
-
-                                VNF sucVNF = this.sfc.findVNFByLastID(targetTaskID);
-                                String sucVCPUID = sucVNF.getvCPUID();
-                                VM host = NCLWUtil.findVM(this.env, sucVCPUID);
-
-                                //String ipAddr =;
-                                NCLWData data = new NCLWData(null, null, this.getTaskID(), targetTaskID, host.getIpAddr(),
-                                        true, portNumber);
-                                data.setSfc(this.sfc);
-                                data.setJob(this.job);
-                                data.setEnv(this.env);
-                                data.setMsg(msg);
-                                data.setFile(false);
-                                SendThread sender = new SendThread();
-                                Thread sendThread = new Thread(sender);
-                                sendThread.start();
-                                sender.getDataQueue().add(data);
-                                System.out.println("outMSG Sent : task" + this.vnf.getIDVector().get(1) + "@" + this.vnf.getvCPUID() + "->" + "task" + targetTaskID + "@" + sucVCPUID);
-
-
-                            }
-
-                        }
-
-
-                    } else {
-
-                    }
-                    //System.out.print("TaskID:"+this.getTaskID());
-                    // System.out.printf(" result=%d%n", result);
-
-                    break;
-                } else {
-
-                }
-            }
-            this.isFinished = true;
-            //remove own task in taskpool
-            NCLWEngine.getIns().getTaskPool().remove(this.getJobID() + "^"+this.getTaskID());
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-    }
-
-    public long getJobID() {
-        return jobID;
-    }
-
-    public void setJobID(long jobID) {
-        this.jobID = jobID;
-    }
-
-    public long getTaskID() {
-        return taskID;
-    }
-
-    public void setTaskID(long taskID) {
-        this.taskID = taskID;
-    }
-
-    public String getCmd() {
-        return cmd;
-    }
-
-    public void setCmd(String cmd) {
-        this.cmd = cmd;
-    }
-
-    public String[] getArgs() {
-        return args;
-    }
-
-    public void setArgs(String[] args) {
-        this.args = args;
-    }
-
-    public LinkedList<FileSendInfo> getOutFileInfoList() {
-        return outFileInfoList;
-    }
-
-    public void setOutFileInfoList(LinkedList<FileSendInfo> outFileInfoList) {
-        this.outFileInfoList = outFileInfoList;
-    }
-
-    public DataSendInfo getOutDataInfo() {
-        return outDataInfo;
-    }
-
-    public void setOutDataInfo(DataSendInfo outDataInfo) {
-        this.outDataInfo = outDataInfo;
-    }
-
-    /*
-        public LinkedList<Long> getFromTaskList() {
-            return fromTaskList;
-        }
-
-        public void setFromTaskList(LinkedList<Long> fromTaskList) {
-            this.fromTaskList = fromTaskList;
-        }
-
-        public LinkedList<Long> getToTaskList() {
-            return toTaskList;
-        }
-
-        public void setToTaskList(LinkedList<Long> toTaskList) {
-            this.toTaskList = toTaskList;
-        }
-    */
-
-    public boolean isEndVNF() {
-        return this.vnf.getDsucList().isEmpty();
-    }
-
-    public long getStartTime() {
-        return startTime;
-    }
-
-    public void setStartTime(long startTime) {
-        this.startTime = startTime;
-    }
-
-    public long getCompletionTime() {
-        return completionTime;
-    }
-
-    public void setCompletionTime(long completionTime) {
-        this.completionTime = completionTime;
-    }
-
-    public String getTargetID() {
-        return targetID;
-    }
-
-    public void setTargetID(String targetID) {
-        this.targetID = targetID;
-    }
-
-    public HashMap<Long, NCLWData> getInDataMap() {
-        return inDataMap;
-    }
-
-    public void setInDataMap(HashMap<Long, NCLWData> inDataMap) {
-        this.inDataMap = inDataMap;
-    }
-
-    public HashMap<Long, NCLWData> getOutDataMap() {
-        return outDataMap;
-    }
-
-    public void setOutDataMap(HashMap<Long, NCLWData> outDataMap) {
-        this.outDataMap = outDataMap;
-    }
-
-    public CustomIDSet getPortSet() {
-        return portSet;
-    }
-
-    public void setPortSet(CustomIDSet portSet) {
-        this.portSet = portSet;
-    }
-
-    public VNF getVnf() {
-        return vnf;
-    }
-
-    public void setVnf(VNF vnf) {
-        this.vnf = vnf;
-    }
-
-    public SFC getSfc() {
-        return sfc;
-    }
-
-    public void setSfc(SFC sfc) {
-        this.sfc = sfc;
-    }
-
-    public NFVEnvironment getEnv() {
-        return env;
-    }
-
-    public void setEnv(NFVEnvironment env) {
-        this.env = env;
-    }
-
-    public WorkflowJob getJob() {
-        return job;
-    }
-
-    public void setJob(WorkflowJob job) {
-        this.job = job;
-    }
-
-    public boolean isStarted() {
-        return isStarted;
-    }
-
-    public void setStarted(boolean started) {
-        isStarted = started;
-    }
-
-    public boolean isFinished() {
-        return isFinished;
-    }
-
-    public void setFinished(boolean finished) {
-        isFinished = finished;
-    }
-}
-                                                lue="$PROJECT_DIR$/mr.properties" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/scheduler/MetaScheduler.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/clustering/HierarchicalVNFClusteringAlgorithm.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/optimization/CoordVNFAlgorithm.java" />
-        <option value="$PROJECT_DIR$/nclw/env" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/main/Catcher.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/core/ComputeHost.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/core/VM.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/core/VCPU.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/main/NCLWMain.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/NCLWDelegator.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/sfc/SFC.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/sfc/VNF.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/FileSendInfo.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/DataSendInfo.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/core/CloudEnvironment.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/ccn/core/CCNRouter.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/ccn/core/CCNDataReceiver.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/clustering/algorithms/AbstractClusteringAlgorithm.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/sfc/VNFCluster.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/sfc/SFCGenerator.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/clustering/SF_CUVAlgorithm.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/main/NFVSchedulingTest.java" />
-        <option value="$PROJECT_DIR$/nfv.properties" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/delegator/WorkflowSender.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/main/Server.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/ServerMgr.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/main/Client.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/delegator/WorkflowJsonLoader.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/engine/NCLWEngine.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/util/ProcessMgr.java" />
-        <option value="$PROJECT_DIR$/build.xml" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/CloudUtil.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/delegator/NCLWDelegator.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/delegator/EnvJsonLoader.java" />
-        <option value="$PROJECT_DIR$/src/net/gripps/ccn/CCNUtil.java" />
-        <option value="$PROJECT_DIR$/nclw/env_ncl.json" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/NCLWData.java" />
-        <option value="$PROJECT_DIR$/nclw.properties" />
-        <option value="$PROJECT_DIR$/nclw/job_ncl.json" />
-        <option value="$PROJECT_DIR$/src/net/gripps/cloud/nfv/clustering/AbstractVNFClusteringAlgorithm.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/util/NCLWUtil.java" />
-        <option value="$PROJECT_DIR$/nclw/env.json" />
-        <option value="$PROJECT_DIR$/nclw/job1.json" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/SendThread.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/RecvThread.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/engine/Task.java" />
-        <option value="$PROJECT_DIR$/src/org/ncl/workflow/comm/WorkflowJob.java" />
-      </list>
-    </option>
-  </component>
-  <component name="MavenProjectNavigator">
-    <treeState>
-      <expand />
-      <select />
-    </treeState>
-  </component>
-  <component name="MavenRunner">
-    <option name="jreName" value="#JAVA_INTERNAL" />
-  </component>
-  <component name="ModuleEditorState">
-    <option name="LAST_EDITED_MODULE_NAME" />
-    <option name="LAST_EDITED_TAB_NAME" />
-  </component>
-  <component name="PhpWorkspaceProjectConfiguration" backward_compatibility_performed="true" />
-  <component name="ProjectFrameBounds" extendedState="6">
-    <option name="x" value="105" />
-    <option name="y" value="105" />
-    <option name="width" value="1925" />
-    <option name="height" value="1055" />
-  </component>
-  <component name="ProjectPane">
-    <subPane>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\test" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\common" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\common" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\common\aplmodel" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\algorithms" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-      <PATH>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewProjectNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.ProjectViewModuleNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\algorithms" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-        <PATH_ELEMENT>
-          <option name="myItemId" value="PsiDirectory:I:\study\Grid\Grid_P2P\gripps\src\net\gripps\clustering\algorithms\sirt_delta" />
-          <option name="myItemType" value="com.intellij.ide.projectView.impl.nodes.PsiDirectoryNode" />
-        </PATH_ELEMENT>
-      </PATH>
-    </subPane>
-  </component>
-  <component name="ProjectReloadState">
-    <option name="STATE" value="0" />
-  </component>
-  <component name="ProjectStructureProblems">
-    <ignored-problems>
-      <problem id="invalid-module-dependency(module:gripps,&lt; 1.7 &gt;)" />
-    </ignored-problems>
-  </component>
-  <component name="ProjectView">
-    <navigator proportions="" version="1">
-      <foldersAlwaysOnTop value="true" />
-    </navigator>
-    <panes>
-      <pane id="PackagesPane" />
-      <pane id="Scope" />
-      <pane id="ProjectPane">
-        <subPane>
-          <expand>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="ccn" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="nclw" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="cloud" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="cloud" type="462c0819:PsiDirectoryNode" />
-              <item name="ccncloud" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="workflow" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="workflow" type="462c0819:PsiDirectoryNode" />
-              <item name="comm" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="workflow" type="462c0819:PsiDirectoryNode" />
-              <item name="delegator" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" type="b2602c69:ProjectViewProjectNode" />
-              <item name="gripps" type="462c0819:PsiDirectoryNode" />
-              <item name="src" type="462c0819:PsiDirectoryNode" />
-              <item name="workflow" type="462c0819:PsiDirectoryNode" />
-              <item name="engine" type="462c0819:PsiDirectoryNode" />
-            </path>
-            <path>
-              <item name="gripps" t
+2020/12/21 02:58:19.657  ,type(1:InterestARRIVED->/2:Org_DataGET<-/13:CacheARRIVED->/3:CacheGET<-/4:CacheARRIVEDByBC->/5:RouterJOIN/6:RouterLEAVE), prefix,DataSize(MB), StartTime,FinishTime,duration(ms),Interest_senderID,Data(Cache)holdingNodeID, Hop#,# of SharedConnections,ContentsFound/Not,ByBC?,Memo
+2020/12/21 02:58:22.609  ,1,6b6020de-b6d1-44a9-9ee5-b54782b9951b,-,1608487101609,1608487102609,1000,44,6,5,-,o,-
+2020/12/21 02:58:22.609  ,1,b7945b56-a20c-43b0-b441-29a3ead94302,-,1608487101594,1608487102609,1015,33,9,4,-,o,-
+2020/12/21 02:58:22.609  ,1,12dd2cf2-3250-418a-86ce-0bb1eeb034e6,-,1608487101609,1608487102609,1000,38,16,2,-,o,-
+2020/12/21 02:58:22.609  ,1,d2d6bbdf-3ed3-4047-8c2c-67c642470a70,-,1608487101594,1608487102609,1015,35,22,5,-,o,-
+2020/12/21 02:58:22.609  ,1,a39ad34a-6c74-4e71-af80-89cc671e47e1,-,1608487101609,1608487102609,1000,43,28,4,-,o,-
+2020/12/21 02:58:22.625  ,1,f6322eae-2f64-49e8-be60-76550349ef4b,-,1608487101594,1608487102625,1031,3,23,4,-,o,-
+2020/12/21 02:58:22.625  ,1,7b1d24ef-3a42-4dd7-8243-6052e390c566,-,1608487101594,1608487102625,1031,0,46,2,-,o,-
+2020/12/21 02:58:22.718  ,1,006249ff-f85c-4736-a267-073966d0b848,-,1608487101609,1608487102718,1109,47,15,3,-,o,-
+2020/12/21 02:58:22.718  ,1,a6156362-a7dd-4b7d-bae6-dcf87796ccee,-,1608487102609,1608487102718,109,6,31,2,-,o,-
+2020/12/21 02:58:22.718  ,1,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487101609,1608487102718,1109,49,11,4,-,o,-
+2020/12/21 02:58:22.718  ,1,47b153ea-4f45-47fb-bf70-f8bb8fc81321,-,1608487101594,1608487102718,1124,19,8,5,-,o,-
+2020/12/21 02:58:22.718  ,1,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487101594,1608487102718,1124,15,3,2,-,o,-
+2020/12/21 02:58:22.734  ,1,10f5507e-d18e-47db-b37a-1b556746dc98,-,1608487101594,1608487102734,1140,26,48,4,-,o,-
+2020/12/21 02:58:22.734  ,1,126be6e6-802b-4428-a473-55b3967c5d20,-,1608487101594,1608487102734,1140,13,41,4,-,o,-
+2020/12/21 02:58:22.734  ,1,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,-,1608487101594,1608487102734,1140,31,38,2,-,o,-
+2020/12/21 02:58:22.734  ,1,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487101594,1608487102734,1140,14,44,4,-,o,-
+2020/12/21 02:58:23.625  ,1,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487101594,1608487103625,2031,34,10,4,-,o,-
+2020/12/21 02:58:23.734  ,1,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,-,1608487102609,1608487103734,1125,22,12,3,-,o,-
+2020/12/21 02:58:23.734  ,1,12dd2cf2-3250-418a-86ce-0bb1eeb034e6,-,1608487102734,1608487103734,1000,38,16,2,-,o,-
+2020/12/21 02:58:23.734  ,1,7b69fd08-dccc-4e2f-9e89-b66ea46f95e6,-,1608487101594,1608487103734,2140,1,18,4,-,o,-
+2020/12/21 02:58:23.734  ,1,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487101594,1608487103734,2140,11,26,3,-,o,-
+2020/12/21 02:58:23.734  ,1,fe706073-ca69-4e9d-b513-cdbbf783a1d4,-,1608487102609,1608487103734,1125,5,32,3,-,o,-
+2020/12/21 02:58:23.734  ,1,424bfd67-cc71-4cad-81c7-45bde6c48d60,-,1608487102609,1608487103734,1125,2,24,4,-,o,-
+2020/12/21 02:58:23.749  ,1,c565f1d0-62c7-46a2-af85-cf98dacead44,-,1608487102609,1608487103749,1140,16,49,5,-,o,-
+2020/12/21 02:58:23.749  ,1,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487101609,1608487103749,2140,41,46,3,-,o,-
+2020/12/21 02:58:23.749  ,1,855064fc-b107-4f9a-bc72-4cb040848562,-,1608487102609,1608487103749,1140,12,37,4,-,o,-
+2020/12/21 02:58:23.906  ,1,244df400-bcde-4c71-a303-42c68fb97dfe,-,1608487101594,1608487103906,2312,18,48,3,-,o,-
+2020/12/21 02:58:23.906  ,1,e5fc7459-8a75-4f22-af36-5095073005e5,-,1608487102609,1608487103906,1297,28,44,3,-,o,-
+2020/12/21 02:58:23.952  ,1,47b153ea-4f45-47fb-bf70-f8bb8fc81321,-,1608487102718,1608487103952,1234,19,8,5,-,o,-
+2020/12/21 02:58:23.952  ,1,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487102625,1608487103952,1327,23,11,5,-,o,-
+2020/12/21 02:58:23.952  ,1,63452d5c-261d-4444-b807-af219da8bdb6,-,1608487103625,1608487103952,327,10,35,3,-,o,-
+2020/12/21 02:58:23.952  ,1,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487102718,1608487103952,1234,15,3,2,-,o,-
+2020/12/21 02:58:24.109  ,13,10f5507e-d18e-47db-b37a-1b556746dc98,-,1608487103734,1608487104119,385,26,587160,3,-,o,-
+2020/12/21 02:58:24.109  ,13,006249ff-f85c-4736-a267-073966d0b848,-,1608487103749,1608487104119,370,47,1038015,2,-,o,-
+2020/12/21 02:58:24.218  ,1,006249ff-f85c-4736-a267-073966d0b848,-,1608487104218,-1,-1608487104219,1038015,-,1,-,x,-
+2020/12/21 02:58:24.218  ,13,47b153ea-4f45-47fb-bf70-f8bb8fc81321,-,1608487103952,1608487104228,276,19,681525,4,-,o,-
+2020/12/21 02:58:24.218  ,1,006249ff-f85c-4736-a267-073966d0b848,-,1608487104218,-1,-1608487104219,1038015,-,1,-,x,-
+2020/12/21 02:58:24.546  ,13,6b6020de-b6d1-44a9-9ee5-b54782b9951b,-,1608487103906,1608487104556,650,44,94365,4,-,o,-
+2020/12/21 02:58:24.640  ,1,d2e343e0-1657-4c72-b97d-04e3e68282c0,-,1608487101594,1608487104640,3046,8,27,4,-,o,-
+2020/12/21 02:58:24.812  ,1,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487102609,1608487104812,2203,32,23,5,-,o,-
+2020/12/21 02:58:24.812  ,1,d14ee122-b1f9-49a7-a5c8-12a8cf9392fe,-,1608487102625,1608487104812,2187,40,28,3,-,o,-
+2020/12/21 02:58:24.812  ,1,72b0d9f0-686d-4a3b-a52a-fdea55e007cc,-,1608487102625,1608487104812,2187,45,6,4,-,o,-
+2020/12/21 02:58:24.812  ,1,b7945b56-a20c-43b0-b441-29a3ead94302,-,1608487102718,1608487104812,2094,33,9,4,-,o,-
+2020/12/21 02:58:25.062  ,1,244df400-bcde-4c71-a303-42c68fb97dfe,-,1608487103734,1608487105062,1328,18,48,3,-,o,-
+2020/12/21 02:58:25.062  ,1,bba6337b-59f5-4f1f-8d7c-780cb7711bad,-,1608487101609,1608487104812,3203,48,13,3,-,o,-
+2020/12/21 02:58:25.108  ,1,7b69fd08-dccc-4e2f-9e89-b66ea46f95e6,-,1608487102718,1608487105108,2390,1,18,4,-,o,-
+2020/12/21 02:58:25.108  ,1,855064fc-b107-4f9a-bc72-4cb040848562,-,1608487103734,1608487105108,1374,12,37,4,-,o,-
+2020/12/21 02:58:25.108  ,1,c565f1d0-62c7-46a2-af85-cf98dacead44,-,1608487103734,1608487105108,1374,16,49,5,-,o,-
+2020/12/21 02:58:25.108  ,1,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,-,1608487102718,1608487105108,2390,31,38,2,-,o,-
+2020/12/21 02:58:25.108  ,1,126be6e6-802b-4428-a473-55b3967c5d20,-,1608487104812,1608487105108,296,13,41,4,-,o,-
+2020/12/21 02:58:25.233  ,1,a6156362-a7dd-4b7d-bae6-dcf87796ccee,-,1608487104812,1608487105233,421,6,31,2,-,o,-
+2020/12/21 02:58:25.233  ,1,62b0cc06-2a57-454c-843c-c6d7c71196af,-,1608487104640,1608487105233,593,27,19,4,-,o,-
+2020/12/21 02:58:25.233  ,1,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487103749,1608487105233,1484,49,11,4,-,o,-
+2020/12/21 02:58:25.358  ,13,855064fc-b107-4f9a-bc72-4cb040848562,-,1608487105108,1608487105368,260,12,314550,3,-,o,-
+2020/12/21 02:58:25.468  ,13,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487105233,1608487105478,245,11,366975,2,-,o,-
+2020/12/21 02:58:25.468  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487105108,1608487105478,370,49,566190,3,-,o,-
+2020/12/21 02:58:25.577  ,13,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487105108,1608487105587,479,15,796860,1,-,o,-
+2020/12/21 02:58:25.593  ,13,006249ff-f85c-4736-a267-073966d0b848,-,1608487105108,1608487105603,495,47,1038015,2,-,o,-
+2020/12/21 02:58:25.655  ,1,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487101594,1608487105655,4061,24,7,3,-,o,-
+2020/12/21 02:58:25.655  ,1,0f2ae735-5245-4be8-9b69-99bfd8437374,-,1608487101594,1608487105655,4061,36,29,4,-,o,-
+2020/12/21 02:58:25.843  ,1,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487102718,1608487105843,3125,34,10,4,-,o,-
+2020/12/21 02:58:25.843  ,1,d2d6bbdf-3ed3-4047-8c2c-67c642470a70,-,1608487102718,1608487105843,3125,35,22,5,-,o,-
+2020/12/21 02:58:25.843  ,1,62a2cc62-1d35-4485-aff6-1f8d835d8619,-,1608487102609,1608487105843,3234,9,2,3,-,o,-
+2020/12/21 02:58:26.218  ,1,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487102718,1608487106218,3500,11,26,3,-,o,-
+2020/12/21 02:58:26.218  ,1,e5fc7459-8a75-4f22-af36-5095073005e5,-,1608487104812,1608487106218,1406,28,44,3,-,o,-
+2020/12/21 02:58:26.311  ,1,ad642bf4-bb98-4ade-a059-0fb00b53d708,-,1608487102625,1608487106311,3686,37,9,4,-,o,-
+2020/12/21 02:58:26.311  ,1,6b6020de-b6d1-44a9-9ee5-b54782b9951b,-,1608487102734,1608487106311,3577,44,6,5,-,o,-
+2020/12/21 02:58:26.311  ,1,ad7c18c9-e7bb-4fa2-a1bb-d6a6026a691b,-,1608487105233,1608487106311,1078,35,5,2,-,o,-
+2020/12/21 02:58:26.218  ,1,fe706073-ca69-4e9d-b513-cdbbf783a1d4,-,1608487104812,1608487106218,1406,5,32,3,-,o,-
+2020/12/21 02:58:26.218  ,1,12dd2cf2-3250-418a-86ce-0bb1eeb034e6,-,1608487105108,1608487106218,1110,38,16,2,-,o,-
+2020/12/21 02:58:26.218  ,13,f6322eae-2f64-49e8-be60-76550349ef4b,-,1608487105233,1608487106165,932,3,786375,3,-,o,-
+2020/12/21 02:58:26.311  ,1,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487102734,1608487106218,3484,41,46,3,-,o,-
+2020/12/21 02:58:26.358  ,1,14114c73-f093-44cf-9675-f2270255c5a8,-,1608487103625,1608487106358,2733,17,8,5,-,o,-
+2020/12/21 02:58:26.358  ,1,994206b4-1fd3-48c5-84a6-45f45cedcaf3,-,1608487105233,1608487106358,1125,33,1,3,-,o,-
+2020/12/21 02:58:26.358  ,1,7b69fd08-dccc-4e2f-9e89-b66ea46f95e6,-,1608487103952,1608487106358,2406,1,18,4,-,o,-
+2020/12/21 02:58:26.358  ,1,bba6337b-59f5-4f1f-8d7c-780cb7711bad,-,1608487102734,1608487106358,3624,48,13,3,-,o,-
+2020/12/21 02:58:26.358  ,13,424bfd67-cc71-4cad-81c7-45bde6c48d60,-,1608487105843,1608487106368,525,2,335520,3,-,o,-
+2020/12/21 02:58:26.421  ,13,fe706073-ca69-4e9d-b513-cdbbf783a1d4,-,1608487106311,1608487106431,120,5,838800,2,-,o,-
+2020/12/21 02:58:26.421  ,13,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487106358,1608487106431,73,41,241155,2,-,o,-
+2020/12/21 02:58:26.421  ,1,a91372ad-e00c-4daa-bc4c-c9e37328cc1d,-,1608487105655,1608487106421,766,20,3,4,-,o,-
+2020/12/21 02:58:26.421  ,13,7b1d24ef-3a42-4dd7-8243-6052e390c566,-,1608487106218,1608487106431,213,0,230670,1,-,o,-
+2020/12/21 02:58:26.421  ,1,63452d5c-261d-4444-b807-af219da8bdb6,-,1608487105843,1608487106421,578,10,35,3,-,o,-
+2020/12/21 02:58:26.421  ,1,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487104812,1608487106421,1609,23,11,5,-,o,-
+2020/12/21 02:58:26.561  ,13,126be6e6-802b-4428-a473-55b3967c5d20,-,1608487106358,1608487106571,213,13,304065,3,-,o,-
+2020/12/21 02:58:26.561  ,13,a39ad34a-6c74-4e71-af80-89cc671e47e1,-,1608487106218,1608487106571,353,43,283095,3,-,o,-
+2020/12/21 02:58:26.561  ,13,a6156362-a7dd-4b7d-bae6-dcf87796ccee,-,1608487106311,1608487106571,260,6,429885,1,-,o,-
+2020/12/21 02:58:26.608  ,13,10f5507e-d18e-47db-b37a-1b556746dc98,-,1608487106218,1608487106618,400,26,587160,3,-,o,-
+2020/12/21 02:58:26.624  ,13,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487106421,1608487106634,213,11,408915,1,-,o,-
+2020/12/21 02:58:26.671  ,13,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487106358,1608487106681,323,34,461340,3,-,o,-
+2020/12/21 02:58:26.686  ,1,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487105233,1608487106686,1453,31,39,3,-,o,-
+2020/12/21 02:58:26.858  ,1,d2e343e0-1657-4c72-b97d-04e3e68282c0,-,1608487102718,1608487106858,4140,8,27,4,-,o,-
+2020/12/21 02:58:26.858  ,1,0f2ae735-5245-4be8-9b69-99bfd8437374,-,1608487102718,1608487106858,4140,36,29,4,-,o,-
+2020/12/21 02:58:26.905  ,13,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487106358,1608487106915,557,15,796860,1,-,o,-
+2020/12/21 02:58:26.920  ,2,7b1d24ef-3a42-4dd7-8243-6052e390c566,65,1608487102625,1608487106920,4295,0,46,2,1,o,-
+2020/12/21 02:58:27.171  ,1,f879d9ec-42a5-475b-943d-c0fd2c2f4db9,-,1608487105655,1608487107171,1516,7,42,4,-,o,-
+2020/12/21 02:58:27.186  ,1,d2d6bbdf-3ed3-4047-8c2c-67c642470a70,-,1608487103952,1608487107186,3234,35,22,5,-,o,-
+2020/12/21 02:58:27.233  ,2,1d9f7949-6d39-4754-86b6-81527e721de4,38,1608487103734,1608487107233,3499,11,26,4,1,o,-
+2020/12/21 02:58:27.374  ,1,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,-,1608487105843,1608487107374,1531,22,12,3,-,o,-
+2020/12/21 02:58:27.374  ,1,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,-,1608487103952,1608487107374,3422,31,38,2,-,o,-
+2020/12/21 02:58:27.374  ,1,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487103656,1608487107374,3718,42,48,5,-,o,-
+2020/12/21 02:58:27.374  ,1,0a73670f-75b9-4ebf-b4f9-5d54504e02ab,-,1608487105233,1608487107374,2141,19,25,4,-,o,-
+2020/12/21 02:58:27.374  ,1,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487106686,1608487107374,688,39,24,4,-,o,-
+2020/12/21 02:58:27.374  ,2,1d9f7949-6d39-4754-86b6-81527e721de4,38,1608487103734,1608487107374,3640,11,26,4,1,o,-
+2020/12/21 02:58:27.374  ,1,b3ac09e2-1f8e-45ab-b100-5a3fd0bfb094,-,1608487102609,1608487107374,4765,21,26,4,-,o,-
+2020/12/21 02:58:27.420  ,1,f6322eae-2f64-49e8-be60-76550349ef4b,-,1608487102718,1608487107420,4702,3,23,4,-,o,-
+2020/12/21 02:58:27.420  ,1,146f897b-1598-4678-9483-ea8d9717b2cc,-,1608487106358,1608487107420,1062,18,45,4,-,o,-
+2020/12/21 02:58:27.420  ,1,d14ee122-b1f9-49a7-a5c8-12a8cf9392fe,-,1608487103749,1608487107420,3671,40,28,3,-,o,-
+2020/12/21 02:58:27.467  ,1,ad642bf4-bb98-4ade-a059-0fb00b53d708,-,1608487103749,1608487107467,3718,37,9,4,-,o,-
+2020/12/21 02:58:27.467  ,13,c565f1d0-62c7-46a2-af85-cf98dacead44,-,1608487106218,1608487107306,1088,16,503280,4,-,o,-
+2020/12/21 02:58:27.467  ,1,72b0d9f0-686d-4a3b-a52a-fdea55e007cc,-,1608487104812,1608487107467,2655,45,6,4,-,o,-
+2020/12/21 02:58:27.545  ,13,d2e343e0-1657-4c72-b97d-04e3e68282c0,-,1608487106358,1608487107384,1026,8,775890,2,-,x,-
+2020/12/21 02:58:27.639  ,1,ee9fe8ed-ba51-42fb-af65-037ba32a7203,-,1608487105062,1608487107639,2577,48,8,3,-,o,-
+2020/12/21 02:58:27.639  ,1,994206b4-1fd3-48c5-84a6-45f45cedcaf3,-,1608487106421,1608487107639,1218,33,1,3,-,o,-
+2020/12/21 02:58:27.639  ,13,a6156362-a7dd-4b7d-bae6-dcf87796ccee,-,1608487107467,1608487107649,182,6,429885,1,-,o,-
+2020/12/21 02:58:27.639  ,13,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,-,1608487107186,1608487107649,463,22,1027530,2,-,o,-
+2020/12/21 02:58:27.702  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487107374,1608487107712,338,49,566190,3,-,o,-
+2020/12/21 02:58:27.639  ,13,855064fc-b107-4f9a-bc72-4cb040848562,-,1608487107374,1608487107649,275,12,314550,3,-,o,-
+2020/12/21 02:58:27.795  ,1,62b0cc06-2a57-454c-843c-c6d7c71196af,-,1608487106858,1608487107795,937,27,19,4,-,o,-
+2020/12/21 02:58:27.920  ,1,e27d87dd-f404-4005-8fbe-5fdfd8615a99,-,1608487102609,1608487107920,5311,25,7,3,-,o,-
+2020/12/21 02:58:27.795  ,1,e33db4b7-7056-4af0-b9aa-b14c6024587e,-,1608487106358,1608487107795,1437,1,31,3,-,o,-
+2020/12/21 02:58:27.983  ,1,d2e343e0-1657-4c72-b97d-04e3e68282c0,-,1608487103952,1608487107983,4031,8,27,4,-,o,-
+2020/12/21 02:58:28.030  ,13,006249ff-f85c-4736-a267-073966d0b848,-,1608487107374,1608487108040,666,47,1038015,2,-,o,-
+2020/12/21 02:58:28.139  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487107420,1608487108149,729,14,20970,3,-,o,-
+2020/12/21 02:58:28.139  ,13,f6322eae-2f64-49e8-be60-76550349ef4b,-,1608487106421,1608487108149,1728,3,786375,3,-,o,-
+2020/12/21 02:58:28.139  ,13,72b0d9f0-686d-4a3b-a52a-fdea55e007cc,-,1608487107420,1608487108149,729,45,314550,3,-,o,-
+2020/12/21 02:58:28.139  ,13,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487107748,1608487108149,401,11,408915,1,-,o,-
+2020/12/21 02:58:28.139  ,13,ad7c18c9-e7bb-4fa2-a1bb-d6a6026a691b,-,1608487107748,1608487108149,401,35,870255,1,-,o,-
+2020/12/21 02:58:28.201  ,1,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487103952,1608487108201,4249,34,10,4,-,o,-
+2020/12/21 02:58:28.389  ,3,1d9f7949-6d39-4754-86b6-81527e721de4,38,1608487106624,1608487108389,1765,11,408915,1,1,o,-
+2020/12/21 02:58:28.389  ,1,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487104812,1608487108389,3577,14,44,4,-,o,-
+2020/12/21 02:58:28.436  ,13,d2e343e0-1657-4c72-b97d-04e3e68282c0,-,1608487107639,1608487108399,760,8,775890,2,-,x,-
+2020/12/21 02:58:28.561  ,13,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487107420,1608487108321,901,23,283095,4,-,o,-
+2020/12/21 02:58:28.561  ,13,62b0cc06-2a57-454c-843c-c6d7c71196af,-,1608487107983,1608487108399,416,27,922680,3,-,o,-
+2020/12/21 02:58:28.561  ,2,d14ee122-b1f9-49a7-a5c8-12a8cf9392fe,57,1608487104812,1608487108436,3624,40,28,4,1,o,-
+2020/12/21 02:58:28.436  ,2,ad7c18c9-e7bb-4fa2-a1bb-d6a6026a691b,50,1608487106311,1608487108436,2125,35,5,2,1,o,-
+2020/12/21 02:58:28.561  ,13,63452d5c-261d-4444-b807-af219da8bdb6,-,1608487108201,1608487108571,370,10,492795,2,-,o,-
+2020/12/21 02:58:28.655  ,1,dafa01da-0685-42db-beae-7c640eb514d6,-,1608487106358,1608487108655,2297,40,18,4,-,o,-
+2020/12/21 02:58:28.655  ,1,bba6337b-59f5-4f1f-8d7c-780cb7711bad,-,1608487103906,1608487108655,4749,48,13,3,-,o,-
+2020/12/21 02:58:28.748  ,1,b3ac09e2-1f8e-45ab-b100-5a3fd0bfb094,-,1608487103734,1608487108748,5014,21,26,4,-,o,-
+2020/12/21 02:58:28.748  ,1,2f7b1bef-80e0-4186-a646-d89baf12d00d,-,1608487107374,1608487108748,1374,0,47,2,-,o,-
+2020/12/21 02:58:28.748  ,2,6b6020de-b6d1-44a9-9ee5-b54782b9951b,34,1608487102609,1608487108748,6139,44,6,6,1,o,-
+2020/12/21 02:58:28.748  ,1,55c7f2c7-45e6-459e-9d54-2ab439243c70,-,1608487107467,1608487108748,1281,16,0,3,-,o,-
+2020/12/21 02:58:28.670  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487108561,1608487108680,119,14,41940,2,-,x,-
+2020/12/21 02:58:28.842  ,13,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487108655,1608487108852,197,41,241155,2,-,x,-
+2020/12/21 02:58:28.889  ,1,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487107795,1608487108889,1094,31,16,4,-,o,-
+2020/12/21 02:58:28.936  ,1,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487107374,1608487108936,1562,26,8,3,-,o,-
+2020/12/21 02:58:28.936  ,1,9bd40a53-e3c4-481c-9a82-dd779bbd48ad,-,1608487107374,1608487108936,1562,38,11,5,-,o,-
+2020/12/21 02:58:28.936  ,1,994206b4-1fd3-48c5-84a6-45f45cedcaf3,-,1608487107795,1608487108936,1141,33,1,3,-,o,-
+2020/12/21 02:58:28.936  ,2,47b153ea-4f45-47fb-bf70-f8bb8fc81321,34,1608487102718,1608487108936,6218,19,8,6,1,o,-
+2020/12/21 02:58:28.998  ,3,7b1d24ef-3a42-4dd7-8243-6052e390c566,65,1608487106421,1608487108998,2577,0,230670,1,1,o,-
+2020/12/21 02:58:29.061  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487108748,1608487109071,323,49,566190,3,-,x,-
+2020/12/21 02:58:29.061  ,1,1f6ae523-9d3a-47f7-8a71-10a7e2034ca0,-,1608487107374,1608487109061,1687,25,17,5,-,o,-
+2020/12/21 02:58:29.061  ,1,e33db4b7-7056-4af0-b9aa-b14c6024587e,-,1608487107639,1608487109061,1422,1,31,3,-,o,-
+2020/12/21 02:58:29.061  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487106358,1608487109061,2703,21,30,5,-,o,-
+2020/12/21 02:58:29.061  ,1,640ebec3-e0b7-4b11-acea-8dac6e7b8800,-,1608487102625,1608487109061,6436,46,29,4,-,o,-
+2020/12/21 02:58:29.279  ,13,e33db4b7-7056-4af0-b9aa-b14c6024587e,-,1608487108936,1608487109289,353,1,660555,2,-,o,-
+2020/12/21 02:58:29.279  ,13,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487108655,1608487109289,634,15,796860,1,-,o,-
+2020/12/21 02:58:29.326  ,1,938eafa5-70c6-49b4-8928-2d9fde811d92,-,1608487107639,1608487109326,1687,36,10,2,-,o,-
+2020/12/21 02:58:29.498  ,1,82a441c2-308d-4534-aed3-64e3a2d1d9f1,-,1608487102609,1608487109498,6889,4,46,5,-,o,-
+2020/12/21 02:58:29.498  ,1,ad7c18c9-e7bb-4fa2-a1bb-d6a6026a691b,-,1608487106421,1608487109498,3077,35,5,2,-,o,-
+2020/12/21 02:58:29.498  ,2,d14ee122-b1f9-49a7-a5c8-12a8cf9392fe,57,1608487104812,1608487109498,4686,40,28,4,1,o,-
+2020/12/21 02:58:29.592  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487105655,1608487109592,3937,30,44,4,-,o,-
+2020/12/21 02:58:29.592  ,1,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487103734,1608487109592,5858,32,23,5,-,o,-
+2020/12/21 02:58:29.592  ,1,8dd0a3af-7972-412c-8bbf-cfa329536042,-,1608487108389,1608487109592,1203,43,45,5,-,o,-
+2020/12/21 02:58:29.592  ,1,a39ad34a-6c74-4e71-af80-89cc671e47e1,-,1608487103749,1608487109592,5843,43,28,4,-,o,-
+2020/12/21 02:58:29.592  ,3,ad7c18c9-e7bb-4fa2-a1bb-d6a6026a691b,50,1608487108139,1608487109592,1453,35,870255,1,1,o,-
+2020/12/21 02:58:29.404  ,3,1d9f7949-6d39-4754-86b6-81527e721de4,38,1608487108139,1608487109404,1265,11,408915,1,1,o,-
+2020/12/21 02:58:29.701  ,13,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,-,1608487109498,1608487109711,213,22,1027530,2,-,o,-
+2020/12/21 02:58:29.795  ,1,244df400-bcde-4c71-a303-42c68fb97dfe,-,1608487105108,1608487109795,4687,18,48,3,-,o,-
+2020/12/21 02:58:29.795  ,1,0a73670f-75b9-4ebf-b4f9-5d54504e02ab,-,1608487106421,1608487109795,3374,19,25,4,-,o,-
+2020/12/21 02:58:29.810  ,13,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487109498,1608487109820,322,32,188730,4,-,o,-
+2020/12/21 02:58:29.873  ,1,1d9f7949-6d39-4754-86b6-81527e721de4,-,1608487103952,1608487109873,5921,11,26,3,-,o,-
+2020/12/21 02:58:29.873  ,1,50f0026a-3665-4965-866c-2614b84763ca,-,1608487107748,1608487109873,2125,3,18,4,-,o,-
+2020/12/21 02:58:29.873  ,1,55c7f2c7-45e6-459e-9d54-2ab439243c70,-,1608487108889,1608487109873,984,16,0,3,-,o,-
+2020/12/21 02:58:29.873  ,1,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,-,1608487108748,1608487109873,1125,47,40,4,-,o,-
+2020/12/21 02:58:29.951  ,13,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487109795,1608487109961,166,24,356490,2,-,o,-
+2020/12/21 02:58:29.951  ,1,b7945b56-a20c-43b0-b441-29a3ead94302,-,1608487103952,1608487109951,5999,33,9,4,-,o,-
+2020/12/21 02:58:29.904  ,13,ee9fe8ed-ba51-42fb-af65-037ba32a7203,-,1608487109795,1608487109914,119,48,52425,2,-,o,-
+2020/12/21 02:58:30.154  ,13,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487109592,1608487110164,572,23,283095,4,-,x,-
+2020/12/21 02:58:30.154  ,13,63452d5c-261d-4444-b807-af219da8bdb6,-,1608487109326,1608487110164,838,10,492795,2,-,o,-
+2020/12/21 02:58:30.185  ,1,ee9fe8ed-ba51-42fb-af65-037ba32a7203,-,1608487107374,1608487110185,2811,48,8,3,-,o,-
+2020/12/21 02:58:30.185  ,1,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487103734,1608487110185,6451,24,7,3,-,o,-
+2020/12/21 02:58:30.185  ,1,9bd40a53-e3c4-481c-9a82-dd779bbd48ad,-,1608487108748,1608487110185,1437,38,11,5,-,o,-
+2020/12/21 02:58:30.232  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487109951,1608487110242,291,39,419400,2,-,x,-
+2020/12/21 02:58:30.279  ,13,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487109670,1608487110289,619,34,461340,3,-,x,-
+2020/12/21 02:58:30.232  ,1,e1c80667-3f1c-47ae-8d72-f67d4e7016c1,-,1608487108936,1608487110232,1296,11,31,4,-,o,-
+2020/12/21 02:58:30.388  ,1,f879d9ec-42a5-475b-943d-c0fd2c2f4db9,-,1608487107920,1608487110388,2468,7,42,4,-,o,-
+2020/12/21 02:58:30.388  ,1,62a2cc62-1d35-4485-aff6-1f8d835d8619,-,1608487104812,1608487110388,5576,9,2,3,-,o,-
+2020/12/21 02:58:30.404  ,13,62a2cc62-1d35-4485-aff6-1f8d835d8619,-,1608487109951,1608487110414,463,9,744435,2,-,o,-
+2020/12/21 02:58:30.654  ,13,424bfd67-cc71-4cad-81c7-45bde6c48d60,-,1608487110388,1608487110664,276,2,387945,1,-,o,-
+2020/12/21 02:58:30.560  ,1,938eafa5-70c6-49b4-8928-2d9fde811d92,-,1608487108936,1608487110513,1577,36,10,2,-,o,-
+2020/12/21 02:58:30.607  ,13,f879d9ec-42a5-475b-943d-c0fd2c2f4db9,-,1608487110185,1608487110617,432,7,188730,3,-,o,-
+2020/12/21 02:58:30.701  ,1,c309fb22-bdb0-4ec2-b7aa-429637ad36f2,-,1608487109061,1608487110701,1640,31,14,4,-,o,-
+2020/12/21 02:58:30.701  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487110701,1608487110711,10,14,125820,1,-,o,-
+2020/12/21 02:58:30.795  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487106858,1608487110795,3937,30,44,4,-,o,-
+2020/12/21 02:58:30.888  ,1,079b9b3d-ab49-447f-80e9-9ff7eaae852c,-,1608487108936,1608487110888,1952,8,15,2,-,o,-
+2020/12/21 02:58:30.888  ,1,2f7b1bef-80e0-4186-a646-d89baf12d00d,-,1608487108748,1608487110888,2140,0,47,2,-,o,-
+2020/12/21 02:58:30.982  ,1,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487107171,1608487110982,3811,42,48,5,-,o,-
+2020/12/21 02:58:31.029  ,1,e403bf5a-4886-4336-ba9b-8e2a24a77d1a,-,1608487108389,1608487111029,2640,37,16,3,-,o,-
+2020/12/21 02:58:31.123  ,1,ad642bf4-bb98-4ade-a059-0fb00b53d708,-,1608487105108,1608487111076,5968,37,9,4,-,o,-
+2020/12/21 02:58:30.951  ,13,08391954-40c4-4a15-9544-23f77e5c5103,-,1608487110888,1608487110961,73,15,796860,1,-,o,-
+2020/12/21 02:58:31.076  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487109795,1608487111076,1281,4,13,3,-,o,-
+2020/12/21 02:58:31.076  ,1,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487109498,1608487111076,1578,5,40,4,-,o,-
+2020/12/21 02:58:31.123  ,13,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487110388,1608487111133,745,42,566190,4,-,o,-
+2020/12/21 02:58:31.123  ,13,8dd0a3af-7972-412c-8bbf-cfa329536042,-,1608487110607,1608487111133,526,43,62910,4,-,o,-
+2020/12/21 02:58:31.076  ,13,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487110888,1608487111086,198,41,262125,1,-,o,-
+2020/12/21 02:58:31.248  ,13,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487110701,1608487111258,557,32,188730,4,-,o,-
+2020/12/21 02:58:31.263  ,13,ee9fe8ed-ba51-42fb-af65-037ba32a7203,-,1608487110982,1608487111273,291,48,136305,1,-,o,-
+2020/12/21 02:58:31.263  ,2,fe706073-ca69-4e9d-b513-cdbbf783a1d4,82,1608487103734,1608487111263,7529,5,32,4,1,o,-
+2020/12/21 02:58:31.263  ,13,55c7f2c7-45e6-459e-9d54-2ab439243c70,-,1608487111029,1608487111273,244,16,450855,2,-,x,-
+2020/12/21 02:58:31.310  ,2,e33db4b7-7056-4af0-b9aa-b14c6024587e,50,1608487107920,1608487111310,3390,1,31,4,1,o,-
+2020/12/21 02:58:31.310  ,2,424bfd67-cc71-4cad-81c7-45bde6c48d60,65,1608487103734,1608487111310,7576,2,24,4,1,o,-
+2020/12/21 02:58:31.341  ,13,9bd40a53-e3c4-481c-9a82-dd779bbd48ad,-,1608487110888,1608487111351,463,38,20970,4,-,o,-
+2020/12/21 02:58:31.341  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487110888,1608487111351,463,49,566190,3,-,x,-
+2020/12/21 02:58:31.404  ,2,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,71,1608487106686,1608487111404,4718,31,39,3,1,o,-
+2020/12/21 02:58:31.404  ,1,e27d87dd-f404-4005-8fbe-5fdfd8615a99,-,1608487103734,1608487111404,7670,25,7,3,-,o,-
+2020/12/21 02:58:31.529  ,2,0f55b1e7-610b-4a04-8054-a3da47694836,86,1608487103749,1608487111529,7780,41,46,4,1,o,-
+2020/12/21 02:58:31.529  ,2,75abd5a4-903c-4321-8e39-00fc2a138665,81,1608487102734,1608487111529,8795,14,44,5,2,o,-
+2020/12/21 02:58:31.685  ,2,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487107374,1608487111685,4311,39,24,4,1,o,-
+2020/12/21 02:58:31.685  ,2,a39ad34a-6c74-4e71-af80-89cc671e47e1,69,1608487102609,1608487111638,9029,43,28,5,1,o,-
+2020/12/21 02:58:31.857  ,1,7b1d24ef-3a42-4dd7-8243-6052e390c566,-,1608487103734,1608487111857,8123,0,46,2,-,o,-
+2020/12/21 02:58:31.857  ,1,146f897b-1598-4678-9483-ea8d9717b2cc,-,1608487108655,1608487111857,3202,18,45,4,-,o,-
+2020/12/21 02:58:31.857  ,1,f6322eae-2f64-49e8-be60-76550349ef4b,-,1608487103952,1608487111857,7905,3,23,4,-,o,-
+2020/12/21 02:58:31.951  ,1,e5fc7459-8a75-4f22-af36-5095073005e5,-,1608487107420,1608487111951,4531,28,44,3,-,o,-
+2020/12/21 02:58:31.997  ,1,1cf508a2-dc78-4f07-839d-3e34b8469407,-,1608487108936,1608487111997,3061,33,20,2,-,o,-
+2020/12/21 02:58:32.091  ,1,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,-,1608487109108,1608487112091,2983,27,47,4,-,o,-
+2020/12/21 02:58:32.091  ,1,b3ac09e2-1f8e-45ab-b100-5a3fd0bfb094,-,1608487105108,1608487112091,6983,21,26,4,-,o,-
+2020/12/21 02:58:32.091  ,1,dafa01da-0685-42db-beae-7c640eb514d6,-,1608487108655,1608487112091,3436,40,18,4,-,o,-
+2020/12/21 02:58:32.263  ,1,ad642bf4-bb98-4ade-a059-0fb00b53d708,-,1608487106421,1608487112263,5842,31,9,4,-,o,-
+2020/12/21 02:58:32.263  ,13,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487111857,1608487112273,416,23,283095,4,-,x,-
+2020/12/21 02:58:32.310  ,1,640ebec3-e0b7-4b11-acea-8dac6e7b8800,-,1608487103749,1608487112310,8561,46,29,4,-,o,-
+2020/12/21 02:58:32.310  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487108655,1608487112310,3655,21,30,5,-,o,-
+2020/12/21 02:58:32.357  ,13,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487111997,1608487112367,370,24,377460,1,-,o,-
+2020/12/21 02:58:32.357  ,3,424bfd67-cc71-4cad-81c7-45bde6c48d60,65,1608487110654,1608487112357,1703,2,387945,1,1,o,-
+2020/12/21 02:58:32.357  ,2,a39ad34a-6c74-4e71-af80-89cc671e47e1,69,1608487102609,1608487112357,9748,43,28,5,1,o,-
+2020/12/21 02:58:32.357  ,2,7d97451e-0d57-46b9-91c8-e115998dba08,79,1608487105655,1608487112357,6702,24,7,4,1,o,-
+2020/12/21 02:58:32.466  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487112263,1608487112476,213,13,566190,3,-,x,-
+2020/12/21 02:58:32.466  ,1,14114c73-f093-44cf-9675-f2270255c5a8,-,1608487106858,1608487112466,5608,17,8,5,-,o,-
+2020/12/21 02:58:32.419  ,13,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487112091,1608487112429,338,26,828315,2,-,o,-
+2020/12/21 02:58:32.591  ,3,a6156362-a7dd-4b7d-bae6-dcf87796ccee,98,1608487106561,1608487112591,6030,6,429885,2,2,o,-
+2020/12/21 02:58:32.638  ,13,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,-,1608487112091,1608487112648,557,47,62910,3,-,o,-
+2020/12/21 02:58:32.872  ,1,d14ee122-b1f9-49a7-a5c8-12a8cf9392fe,-,1608487105108,1608487112872,7764,40,28,3,-,o,-
+2020/12/21 02:58:32.872  ,1,957c0631-f89c-495e-b484-1d6fdfee4514,-,1608487110232,1608487112872,2640,31,37,5,-,o,-
+2020/12/21 02:58:33.013  ,1,82a441c2-308d-4534-aed3-64e3a2d1d9f1,-,1608487103734,1608487113013,9279,4,46,5,-,o,-
+2020/12/21 02:58:33.013  ,1,3a382315-0307-4af1-b1ff-b4f2de4e1995,-,1608487110513,1608487113013,2500,10,34,3,-,o,-
+2020/12/21 02:58:33.013  ,1,0a73670f-75b9-4ebf-b4f9-5d54504e02ab,-,1608487107795,1608487113013,5218,19,25,4,-,o,-
+2020/12/21 02:58:33.013  ,1,938eafa5-70c6-49b4-8928-2d9fde811d92,-,1608487111248,1608487113013,1765,36,10,2,-,o,-
+2020/12/21 02:58:33.107  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487110185,1608487113107,2922,1,39,3,-,o,-
+2020/12/21 02:58:33.107  ,2,7d97451e-0d57-46b9-91c8-e115998dba08,79,1608487105655,1608487113107,7452,24,7,4,1,o,-
+2020/12/21 02:58:33.107  ,1,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487112091,1608487113107,1016,49,41,3,-,o,-
+2020/12/21 02:58:33.200  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487113107,1608487113210,103,39,587160,1,-,o,-
+2020/12/21 02:58:33.247  ,1,3294ed7f-20cc-40fd-ad2d-2a6eed6daead,-,1608487109592,1608487113247,3655,45,47,4,-,o,-
+2020/12/21 02:58:33.247  ,2,62b0cc06-2a57-454c-843c-c6d7c71196af,64,1608487105233,1608487113247,8014,27,19,5,1,o,-
+2020/12/21 02:58:33.247  ,3,ee9fe8ed-ba51-42fb-af65-037ba32a7203,29,1608487111263,1608487113200,1937,48,136305,1,2,o,-
+2020/12/21 02:58:33.200  ,1,ea144cf0-b4dd-40d4-a2b3-46d5568e67f9,-,1608487112091,1608487113200,1109,38,48,4,-,o,-
+2020/12/21 02:58:33.294  ,1,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,-,1608487110888,1608487113294,2406,47,40,4,-,o,-
+2020/12/21 02:58:33.294  ,1,e403bf5a-4886-4336-ba9b-8e2a24a77d1a,-,1608487110607,1608487113294,2687,37,16,3,-,o,-
+2020/12/21 02:58:33.294  ,2,994206b4-1fd3-48c5-84a6-45f45cedcaf3,41,1608487106358,1608487113294,6936,33,1,5,1,o,-
+2020/12/21 02:58:33.310  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487112263,1608487113320,1057,9,461340,6,-,o,-
+2020/12/21 02:58:33.325  ,1,1f6ae523-9d3a-47f7-8a71-10a7e2034ca0,-,1608487109795,1608487113325,3530,25,17,5,-,o,-
+2020/12/21 02:58:33.372  ,2,640ebec3-e0b7-4b11-acea-8dac6e7b8800,30,1608487109061,1608487113372,4311,46,29,5,1,o,-
+2020/12/21 02:58:33.388  ,1,a91372ad-e00c-4daa-bc4c-c9e37328cc1d,-,1608487111997,1608487113388,1391,20,3,4,-,o,-
+2020/12/21 02:58:33.450  ,1,0f2ae735-5245-4be8-9b69-99bfd8437374,-,1608487103952,1608487113450,9498,36,29,4,-,o,-
+2020/12/21 02:58:33.497  ,1,e1c80667-3f1c-47ae-8d72-f67d4e7016c1,-,1608487110185,1608487113497,3312,11,31,4,-,o,-
+2020/12/21 02:58:33.497  ,13,8dd0a3af-7972-412c-8bbf-cfa329536042,-,1608487112872,1608487113460,588,43,73395,3,-,x,-
+2020/12/21 02:58:33.497  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487109873,1608487113497,3624,21,30,5,-,o,-
+2020/12/21 02:58:33.575  ,13,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487113013,1608487113523,510,34,482310,2,-,x,-
+2020/12/21 02:58:33.606  ,3,a6156362-a7dd-4b7d-bae6-dcf87796ccee,98,1608487106561,1608487113606,7045,6,429885,2,2,o,-
+2020/12/21 02:58:33.606  ,1,6d99ffc6-728a-4440-96ac-3e5b5fa35521,-,1608487108920,1608487113606,4686,6,42,2,-,o,-
+2020/12/21 02:58:33.606  ,3,0f55b1e7-610b-4a04-8054-a3da47694836,86,1608487111076,1608487113606,2530,41,262125,1,1,o,-
+2020/12/21 02:58:33.732  ,2,75abd5a4-903c-4321-8e39-00fc2a138665,81,1608487102734,1608487113732,10998,14,44,5,2,o,-
+2020/12/21 02:58:33.809  ,2,640ebec3-e0b7-4b11-acea-8dac6e7b8800,30,1608487109061,1608487113809,4748,46,29,5,1,o,-
+2020/12/21 02:58:33.825  ,13,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487113013,1608487113835,822,32,188730,4,-,o,-
+2020/12/21 02:58:33.888  ,13,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,-,1608487113247,1608487113898,651,47,62910,3,-,o,-
+2020/12/21 02:58:34.028  ,1,146f897b-1598-4678-9483-ea8d9717b2cc,-,1608487109873,1608487114028,4155,18,45,4,-,o,-
+2020/12/21 02:58:34.028  ,1,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487106218,1608487114028,7810,32,23,5,-,o,-
+2020/12/21 02:58:34.060  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487114028,1608487114070,42,14,125820,1,-,o,-
+2020/12/21 02:58:34.060  ,13,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,-,1608487113732,1608487114070,338,22,1027530,2,-,x,-
+2020/12/21 02:58:34.060  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487113388,1608487114070,682,9,461340,6,-,o,-
+2020/12/21 02:58:34.060  ,13,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487113606,1608487114070,464,42,566190,4,-,o,-
+2020/12/21 02:58:34.122  ,1,079b9b3d-ab49-447f-80e9-9ff7eaae852c,-,1608487110185,1608487114122,3937,8,15,2,-,o,-
+2020/12/21 02:58:34.138  ,1,3a382315-0307-4af1-b1ff-b4f2de4e1995,-,1608487113013,1608487114138,1125,10,34,3,-,o,-
+2020/12/21 02:58:34.247  ,1,e418a937-e75c-450d-b2aa-fd3b393efc1c,-,1608487108936,1608487114247,5311,35,20,4,-,o,-
+2020/12/21 02:58:34.325  ,1,938eafa5-70c6-49b4-8928-2d9fde811d92,-,1608487112372,1608487114325,1953,36,10,2,-,o,-
+2020/12/21 02:58:34.325  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487109061,1608487114325,5264,30,44,4,-,o,-
+2020/12/21 02:58:34.387  ,1,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487113247,1608487114387,1140,49,41,3,-,o,-
+2020/12/21 02:58:34.387  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487106218,1608487114387,8169,44,26,4,-,o,-
+2020/12/21 02:58:34.387  ,2,bba6337b-59f5-4f1f-8d7c-780cb7711bad,81,1608487105062,1608487114387,9325,48,13,5,2,o,-
+2020/12/21 02:58:34.387  ,1,50f0026a-3665-4965-866c-2614b84763ca,-,1608487108936,1608487114387,5451,3,18,4,-,o,-
+2020/12/21 02:58:34.387  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487114387,1187,39,587160,1,1,o,-
+2020/12/21 02:58:34.387  ,1,9c08b513-e228-41a0-b9bf-3e7a351a21bf,-,1608487111076,1608487114387,3311,13,39,4,-,o,-
+2020/12/21 02:58:34.466  ,1,1f6ae523-9d3a-47f7-8a71-10a7e2034ca0,-,1608487113013,1608487114466,1453,25,17,5,-,o,-
+2020/12/21 02:58:34.466  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487113107,1608487114466,1359,41,21,5,-,o,-
+2020/12/21 02:58:34.450  ,13,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487114387,1608487114460,73,26,828315,2,-,o,-
+2020/12/21 02:58:34.403  ,1,2f7b1bef-80e0-4186-a646-d89baf12d00d,-,1608487109873,1608487114403,4530,0,47,2,-,o,-
+2020/12/21 02:58:34.512  ,1,77a79a19-ded6-4889-b98d-127c1891517b,-,1608487111076,1608487114512,3436,0,16,5,-,o,-
+2020/12/21 02:58:34.559  ,13,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487114138,1608487114569,431,24,377460,1,-,o,-
+2020/12/21 02:58:34.637  ,1,b52382ce-d76f-4047-9a7e-9d877a9a5d95,-,1608487105655,1608487114637,8982,29,2,3,-,o,-
+2020/12/21 02:58:34.637  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487113325,1608487114637,1312,17,33,4,-,o,-
+2020/12/21 02:58:34.637  ,1,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487105108,1608487114637,9529,24,7,3,-,o,-
+2020/12/21 02:58:34.637  ,1,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487108748,1608487114637,5889,26,8,3,-,o,-
+2020/12/21 02:58:34.637  ,1,51884a65-edff-4a90-b5a6-96a0e163c546,-,1608487113294,1608487114637,1343,40,36,5,-,o,-
+2020/12/21 02:58:34.684  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487114387,1608487114694,307,39,587160,1,-,o,-
+2020/12/21 02:58:34.684  ,13,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487114403,1608487114694,291,49,880740,2,-,o,-
+2020/12/21 02:58:34.747  ,1,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487114122,1608487114747,625,15,36,3,-,o,-
+2020/12/21 02:58:34.747  ,3,75abd5a4-903c-4321-8e39-00fc2a138665,81,1608487110701,1608487114747,4046,14,125820,2,2,o,-
+2020/12/21 02:58:34.856  ,13,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,-,1608487114403,1608487114866,463,47,62910,3,-,x,-
+2020/12/21 02:58:34.856  ,13,12dd2cf2-3250-418a-86ce-0bb1eeb034e6,-,1608487114512,1608487114866,354,16,996075,3,-,o,-
+2020/12/21 02:58:34.887  ,1,a29d2d98-58d3-4379-b235-03373a1c25dc,-,1608487114138,1608487114887,749,34,5,2,-,o,-
+2020/12/21 02:58:34.903  ,13,08c575fc-3876-458b-8a27-b6c7f183f250,-,1608487114028,1608487114913,885,23,283095,4,-,x,-
+2020/12/21 02:58:35.012  ,1,5f8eef1b-1938-475a-9bf8-3db96dea2788,-,1608487114512,1608487115012,500,3,37,3,-,o,-
+2020/12/21 02:58:35.012  ,1,cbde21b2-6cda-432d-9b83-7819b2fa5a54,-,1608487114637,1608487115012,375,35,28,3,-,o,-
+2020/12/21 02:58:35.137  ,3,7d97451e-0d57-46b9-91c8-e115998dba08,79,1608487112357,1608487115137,2780,24,377460,2,1,o,-
+2020/12/21 02:58:35.153  ,1,66144acd-856b-40bd-9969-e1b323ade743,-,1608487112466,1608487115153,2687,19,12,3,-,o,-
+2020/12/21 02:58:35.153  ,1,146f897b-1598-4678-9483-ea8d9717b2cc,-,1608487112091,1608487115153,3062,18,45,4,-,o,-
+2020/12/21 02:58:35.262  ,1,079b9b3d-ab49-447f-80e9-9ff7eaae852c,-,1608487112466,1608487115262,2796,8,15,2,-,o,-
+2020/12/21 02:58:35.262  ,1,3a382315-0307-4af1-b1ff-b4f2de4e1995,-,1608487114325,1608487115262,937,10,34,3,-,o,-
+2020/12/21 02:58:35.309  ,1,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487115262,1608487115309,47,15,36,3,-,o,-
+2020/12/21 02:58:35.309  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487114512,1608487115179,667,9,461340,6,-,o,-
+2020/12/21 02:58:35.169  ,13,a91372ad-e00c-4daa-bc4c-c9e37328cc1d,-,1608487114247,1608487115179,932,20,293580,3,-,o,-
+2020/12/21 02:58:35.434  ,2,9bd40a53-e3c4-481c-9a82-dd779bbd48ad,25,1608487108936,1608487115434,6498,38,11,6,1,o,-
+2020/12/21 02:58:35.481  ,1,e5fc7459-8a75-4f22-af36-5095073005e5,-,1608487109592,1608487115481,5889,28,44,3,-,o,-
+2020/12/21 02:58:35.528  ,1,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487111732,1608487115528,3796,5,40,4,-,o,-
+2020/12/21 02:58:35.528  ,3,08391954-40c4-4a15-9544-23f77e5c5103,61,1608487105577,1608487115528,9951,15,796860,4,4,o,-
+2020/12/21 02:58:35.715  ,1,e1c80667-3f1c-47ae-8d72-f67d4e7016c1,-,1608487111404,1608487115715,4311,11,31,4,-,o,-
+2020/12/21 02:58:35.715  ,2,542322c2-9501-4fac-bfb3-b9d30f387a18,70,1608487103625,1608487115715,12090,34,10,6,1,o,-
+2020/12/21 02:58:35.715  ,1,17196616-8177-45b2-b1c6-2597ab578497,-,1608487109873,1608487115715,5842,13,47,3,-,o,-
+2020/12/21 02:58:35.715  ,1,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487111076,1608487115715,4639,9,16,7,-,o,-
+2020/12/21 02:58:35.715  ,1,ea144cf0-b4dd-40d4-a2b3-46d5568e67f9,-,1608487114387,1608487115715,1328,38,48,4,-,o,-
+2020/12/21 02:58:35.715  ,1,0f2ae735-5245-4be8-9b69-99bfd8437374,-,1608487106358,1608487115715,9357,36,29,4,-,o,-
+2020/12/21 02:58:35.715  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487114387,1608487115715,1328,41,21,5,-,o,-
+2020/12/21 02:58:35.715  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487115700,2500,39,587160,2,1,o,-
+2020/12/21 02:58:35.731  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487115528,1608487115741,213,13,335520,3,-,o,-
+2020/12/21 02:58:35.825  ,1,e1c80667-3f1c-47ae-8d72-f67d4e7016c1,-,1608487112591,1608487115825,3234,11,31,4,-,o,-
+2020/12/21 02:58:35.778  ,1,62a2cc62-1d35-4485-aff6-1f8d835d8619,-,1608487106311,1608487115778,9467,9,2,3,-,o,-
+2020/12/21 02:58:35.825  ,1,3294ed7f-20cc-40fd-ad2d-2a6eed6daead,-,1608487111857,1608487115825,3968,45,47,4,-,o,-
+2020/12/21 02:58:35.778  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487113388,1608487115778,2390,13,33,6,-,o,-
+2020/12/21 02:58:35.934  ,1,60867885-4821-4779-8578-664501167a4c,-,1608487115528,1608487115934,406,6,31,3,-,o,-
+2020/12/21 02:58:35.934  ,1,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,-,1608487112466,1608487115934,3468,27,47,4,-,o,-
+2020/12/21 02:58:36.043  ,1,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,-,1608487113606,1608487116043,2437,27,47,4,-,o,-
+2020/12/21 02:58:36.137  ,13,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,-,1608487115153,1608487116147,994,32,188730,4,-,x,-
+2020/12/21 02:58:36.137  ,13,8dd0a3af-7972-412c-8bbf-cfa329536042,-,1608487116043,1608487116147,104,43,94365,2,-,x,-
+2020/12/21 02:58:36.090  ,13,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,-,1608487115872,1608487116100,228,27,471825,3,-,o,-
+2020/12/21 02:58:36.153  ,13,51884a65-edff-4a90-b5a6-96a0e163c546,-,1608487115528,1608487116163,635,40,157275,4,-,o,-
+2020/12/21 02:58:36.153  ,1,3294ed7f-20cc-40fd-ad2d-2a6eed6daead,-,1608487114028,1608487116153,2125,45,47,4,-,o,-
+2020/12/21 02:58:36.168  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487115778,1608487116168,390,33,23,6,-,o,-
+2020/12/21 02:58:36.168  ,1,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487114512,1608487116168,1656,4,14,3,-,o,-
+2020/12/21 02:58:36.356  ,1,54d8fea3-8922-47d3-b4d3-349e0eae9fb4,-,1608487109498,1608487116356,6858,46,25,4,-,o,-
+2020/12/21 02:58:36.356  ,1,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,-,1608487114731,1608487116262,1531,27,47,4,-,o,-
+2020/12/21 02:58:36.356  ,1,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487115715,1608487116262,547,31,31,7,-,o,-
+2020/12/21 02:58:36.356  ,1,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,-,1608487115481,1608487116356,875,44,32,3,-,o,-
+2020/12/21 02:58:36.356  ,1,5f8eef1b-1938-475a-9bf8-3db96dea2788,-,1608487115715,1608487116356,641,3,37,3,-,o,-
+2020/12/21 02:58:36.356  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487115012,1608487116356,1344,37,28,4,-,o,-
+2020/12/21 02:58:36.356  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487116168,1608487116366,198,14,125820,1,-,o,-
+2020/12/21 02:58:36.371  ,13,542322c2-9501-4fac-bfb3-b9d30f387a18,-,1608487115715,1608487116381,666,47,461340,2,-,x,-
+2020/12/21 02:58:36.387  ,1,079b9b3d-ab49-447f-80e9-9ff7eaae852c,-,1608487114637,1608487116387,1750,8,15,2,-,o,-
+2020/12/21 02:58:36.450  ,2,6d99ffc6-728a-4440-96ac-3e5b5fa35521,55,1608487113606,1608487116450,2844,6,42,2,1,o,-
+2020/12/21 02:58:36.543  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487109795,1608487116543,6748,12,18,4,-,o,-
+2020/12/21 02:58:36.481  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487116387,1608487116491,104,15,859770,2,-,o,-
+2020/12/21 02:58:36.637  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487112310,1608487116637,4327,30,44,4,-,o,-
+2020/12/21 02:58:36.590  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487115715,1608487116600,885,9,461340,6,-,o,-
+2020/12/21 02:58:36.699  ,1,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487114887,1608487116699,1812,5,40,4,-,o,-
+2020/12/21 02:58:36.699  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487115715,1608487116653,938,16,13,5,-,o,-
+2020/12/21 02:58:36.731  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487111076,1608487116731,5655,21,30,5,-,o,-
+2020/12/21 02:58:36.793  ,1,14114c73-f093-44cf-9675-f2270255c5a8,-,1608487109061,1608487116793,7732,17,8,5,-,o,-
+2020/12/21 02:58:36.793  ,3,75abd5a4-903c-4321-8e39-00fc2a138665,81,1608487110701,1608487116793,6092,14,125820,3,2,o,-
+2020/12/21 02:58:36.887  ,1,77a79a19-ded6-4889-b98d-127c1891517b,-,1608487112310,1608487116887,4577,0,16,5,-,o,-
+2020/12/21 02:58:36.887  ,1,89f0c531-211a-4df8-84d1-aeb1e9c02f92,-,1608487115153,1608487116887,1734,45,48,4,-,o,-
+2020/12/21 02:58:36.887  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487115512,1608487116887,1375,41,21,5,-,o,-
+2020/12/21 02:58:36.887  ,1,6d99ffc6-728a-4440-96ac-3e5b5fa35521,-,1608487111248,1608487116887,5639,6,42,2,-,o,-
+2020/12/21 02:58:36.887  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487116168,1608487116887,719,23,13,5,-,o,-
+2020/12/21 02:58:36.887  ,13,8dd0a3af-7972-412c-8bbf-cfa329536042,-,1608487116356,1608487116897,541,37,94365,2,-,x,-
+2020/12/21 02:58:36.996  ,1,60867885-4821-4779-8578-664501167a4c,-,1608487116653,1608487116996,343,6,31,3,-,o,-
+2020/12/21 02:58:37.027  ,1,e403bf5a-4886-4336-ba9b-8e2a24a77d1a,-,1608487112872,1608487117027,4155,37,16,3,-,o,-
+2020/12/21 02:58:37.059  ,2,a29d2d98-58d3-4379-b235-03373a1c25dc,35,1608487114887,1608487117059,2172,34,5,2,1,o,-
+2020/12/21 02:58:37.074  ,13,75abd5a4-903c-4321-8e39-00fc2a138665,-,1608487116543,1608487117084,541,18,20970,3,-,x,-
+2020/12/21 02:58:37.168  ,3,7d97451e-0d57-46b9-91c8-e115998dba08,79,1608487112357,1608487117168,4811,24,377460,2,1,o,-
+2020/12/21 02:58:37.168  ,13,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487116887,1608487117178,291,42,566190,4,-,x,-
+2020/12/21 02:58:37.168  ,1,77a79a19-ded6-4889-b98d-127c1891517b,-,1608487114466,1608487117168,2702,0,16,5,-,o,-
+2020/12/21 02:58:37.215  ,13,66144acd-856b-40bd-9969-e1b323ade743,-,1608487116887,1608487117225,338,19,838800,2,-,o,-
+2020/12/21 02:58:37.215  ,1,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487105108,1608487117215,12107,41,46,3,-,o,-
+2020/12/21 02:58:37.277  ,13,51884a65-edff-4a90-b5a6-96a0e163c546,-,1608487116699,1608487117287,588,40,157275,4,-,o,-
+2020/12/21 02:58:37.418  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487113200,1608487117418,4218,48,45,4,-,o,-
+2020/12/21 02:58:37.481  ,1,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,-,1608487116637,1608487117481,844,44,32,3,-,o,-
+2020/12/21 02:58:37.324  ,13,cbde21b2-6cda-432d-9b83-7819b2fa5a54,-,1608487117059,1608487117334,275,35,440370,2,-,o,-
+2020/12/21 02:58:37.481  ,1,e1c80667-3f1c-47ae-8d72-f67d4e7016c1,-,1608487116887,1608487117434,547,16,31,5,-,o,-
+2020/12/21 02:58:37.527  ,13,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487117418,1608487117537,119,24,377460,1,-,o,-
+2020/12/21 02:58:37.559  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487111997,1608487117559,5562,4,39,5,-,o,-
+2020/12/21 02:58:37.559  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487108389,1608487117559,9170,44,26,4,-,o,-
+2020/12/21 02:58:37.637  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487117559,1608487117647,88,39,587160,1,-,o,-
+2020/12/21 02:58:37.652  ,13,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487117559,1608487117662,103,26,828315,2,-,x,-
+2020/12/21 02:58:37.730  ,1,dafa01da-0685-42db-beae-7c640eb514d6,-,1608487109873,1608487117730,7857,40,18,4,-,o,-
+2020/12/21 02:58:37.730  ,2,d2e343e0-1657-4c72-b97d-04e3e68282c0,46,1608487104640,1608487117730,13090,8,27,6,1,o,-
+2020/12/21 02:58:37.762  ,1,e5fc7459-8a75-4f22-af36-5095073005e5,-,1608487112872,1608487117762,4890,28,44,3,-,o,-
+2020/12/21 02:58:37.824  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487117559,1608487117772,213,15,943650,1,-,o,-
+2020/12/21 02:58:37.840  ,1,dafa01da-0685-42db-beae-7c640eb514d6,-,1608487111076,1608487117840,6764,40,18,4,-,o,-
+2020/12/21 02:58:37.840  ,13,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487117559,1608487117850,291,49,880740,2,-,x,-
+2020/12/21 02:58:37.902  ,1,640ebec3-e0b7-4b11-acea-8dac6e7b8800,-,1608487106218,1608487117902,11684,46,29,4,-,o,-
+2020/12/21 02:58:37.902  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487113325,1608487117902,4577,21,30,5,-,o,-
+2020/12/21 02:58:37.949  ,1,50f0026a-3665-4965-866c-2614b84763ca,-,1608487111248,1608487117949,6701,3,18,4,-,o,-
+2020/12/21 02:58:37.949  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487116887,1608487117959,1072,9,461340,6,-,o,-
+2020/12/21 02:58:38.043  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487116731,1608487118043,1312,4,21,4,-,o,-
+2020/12/21 02:58:38.059  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487111997,1608487118059,6062,12,18,4,-,o,-
+2020/12/21 02:58:38.137  ,2,d2d6bbdf-3ed3-4047-8c2c-67c642470a70,45,1608487102609,1608487118137,15528,35,22,7,1,o,-
+2020/12/21 02:58:38.137  ,1,417fe42c-f02a-449c-8e3f-5b518f9da753,-,1608487113497,1608487118137,4640,36,22,3,-,o,-
+2020/12/21 02:58:38.199  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487114466,1608487118199,3733,17,33,4,-,o,-
+2020/12/21 02:58:38.215  ,1,50f0026a-3665-4965-866c-2614b84763ca,-,1608487113388,1608487118215,4827,3,18,4,-,o,-
+2020/12/21 02:58:38.262  ,1,ced76fa2-2613-4442-8673-4e685c57175c,-,1608487118043,1608487118262,219,3,36,2,-,o,-
+2020/12/21 02:58:38.324  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487115153,1608487118324,3171,12,18,4,-,o,-
+2020/12/21 02:58:38.340  ,1,82a441c2-308d-4534-aed3-64e3a2d1d9f1,-,1608487106218,1608487118340,12122,4,46,5,-,o,-
+2020/12/21 02:58:38.465  ,1,66144acd-856b-40bd-9969-e1b323ade743,-,1608487113606,1608487118465,4859,19,12,3,-,o,-
+2020/12/21 02:58:38.465  ,1,eba158f0-45b8-41c6-bc0b-8570a3e7a354,-,1608487115012,1608487118465,3453,28,14,3,-,o,-
+2020/12/21 02:58:38.465  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487116793,1608487118465,1672,8,18,2,-,o,-
+2020/12/21 02:58:38.527  ,1,cbde21b2-6cda-432d-9b83-7819b2fa5a54,-,1608487115778,1608487118527,2749,35,28,3,-,o,-
+2020/12/21 02:58:38.527  ,1,0a73670f-75b9-4ebf-b4f9-5d54504e02ab,-,1608487110185,1608487118527,8342,19,25,4,-,o,-
+2020/12/21 02:58:38.543  ,1,146f897b-1598-4678-9483-ea8d9717b2cc,-,1608487114387,1608487118543,4156,18,45,4,-,o,-
+2020/12/21 02:58:38.652  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487116653,1608487118652,1999,13,18,4,-,o,-
+2020/12/21 02:58:38.652  ,13,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487118215,1608487118662,447,5,262125,3,-,o,-
+2020/12/21 02:58:38.668  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487118668,5468,39,587160,3,1,o,-
+2020/12/21 02:58:38.761  ,13,60867885-4821-4779-8578-664501167a4c,-,1608487117824,1608487118771,947,6,922680,2,-,x,-
+2020/12/21 02:58:38.761  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487117902,1608487118761,859,4,18,2,-,o,-
+2020/12/21 02:58:38.761  ,2,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,62,1608487112091,1608487118761,6670,27,47,7,1,o,-
+2020/12/21 02:58:38.761  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487112466,1608487118761,6295,1,39,3,-,o,-
+2020/12/21 02:58:38.808  ,1,79a20c9d-eb73-4115-9578-58320a312d03,-,1608487118465,1608487118808,343,14,16,4,-,o,-
+2020/12/21 02:58:38.840  ,1,e27d87dd-f404-4005-8fbe-5fdfd8615a99,-,1608487105108,1608487118840,13732,25,7,3,-,o,-
+2020/12/21 02:58:38.840  ,3,75abd5a4-903c-4321-8e39-00fc2a138665,81,1608487110701,1608487118840,8139,14,125820,3,2,o,-
+2020/12/21 02:58:38.871  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487118465,1608487118871,406,12,18,4,-,o,-
+2020/12/21 02:58:38.918  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487118761,1608487118928,167,39,587160,1,-,o,-
+2020/12/21 02:58:38.965  ,1,f55d2f93-d8de-4309-a074-f37d9f86645f,-,1608487115715,1608487118918,3203,29,40,4,-,o,-
+2020/12/21 02:58:38.965  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487118465,1608487118965,500,23,13,5,-,o,-
+2020/12/21 02:58:39.027  ,13,60867885-4821-4779-8578-664501167a4c,-,1608487118965,1608487119037,72,6,922680,2,-,x,-
+2020/12/21 02:58:39.058  ,1,daf04612-1768-447d-bae8-de742bb67e48,-,1608487115262,1608487119058,3796,34,48,4,-,o,-
+2020/12/21 02:58:39.136  ,1,27e71254-30c3-4b89-b498-fe1e21cf1cab,-,1608487115715,1608487119136,3421,21,40,4,-,o,-
+2020/12/21 02:58:39.152  ,1,af07602c-ebbc-4ef8-a285-6998ffcf7c49,-,1608487109873,1608487119152,9279,26,8,3,-,o,-
+2020/12/21 02:58:39.230  ,1,7edae520-c27f-46f3-b578-6a72c1330867,-,1608487116356,1608487119230,2874,32,21,4,-,o,-
+2020/12/21 02:58:39.246  ,1,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487116043,1608487119246,3203,5,40,4,-,o,-
+2020/12/21 02:58:39.308  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487118043,1608487119318,1275,9,461340,6,-,x,-
+2020/12/21 02:58:39.324  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487116731,1608487119324,2593,17,33,4,-,o,-
+2020/12/21 02:58:39.340  ,13,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487118761,1608487119350,589,49,880740,2,-,x,-
+2020/12/21 02:58:39.355  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487119152,1608487119355,203,8,18,2,-,o,-
+2020/12/21 02:58:39.355  ,1,ced76fa2-2613-4442-8673-4e685c57175c,-,1608487119230,1608487119355,125,3,36,2,-,o,-
+2020/12/21 02:58:39.433  ,1,27e71254-30c3-4b89-b498-fe1e21cf1cab,-,1608487116887,1608487119433,2546,21,40,4,-,o,-
+2020/12/21 02:58:39.464  ,13,51884a65-edff-4a90-b5a6-96a0e163c546,-,1608487118918,1608487119474,556,40,157275,4,-,o,-
+2020/12/21 02:58:39.480  ,1,82a441c2-308d-4534-aed3-64e3a2d1d9f1,-,1608487107374,1608487119480,12106,4,46,5,-,o,-
+2020/12/21 02:58:39.543  ,1,5f8eef1b-1938-475a-9bf8-3db96dea2788,-,1608487116887,1608487119543,2656,3,37,3,-,o,-
+2020/12/21 02:58:39.574  ,3,7d97451e-0d57-46b9-91c8-e115998dba08,79,1608487112357,1608487119574,7217,24,377460,3,1,o,-
+2020/12/21 02:58:39.574  ,1,f55d2f93-d8de-4309-a074-f37d9f86645f,-,1608487117902,1608487119574,1672,29,40,4,-,o,-
+2020/12/21 02:58:39.589  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487118199,1608487119589,1390,33,23,6,-,o,-
+2020/12/21 02:58:39.589  ,1,1cf508a2-dc78-4f07-839d-3e34b8469407,-,1608487110185,1608487119589,9404,33,20,2,-,o,-
+2020/12/21 02:58:39.589  ,1,66144acd-856b-40bd-9969-e1b323ade743,-,1608487114731,1608487119589,4858,19,12,3,-,o,-
+2020/12/21 02:58:39.746  ,13,a39ad34a-6c74-4e71-af80-89cc671e47e1,-,1608487119589,1608487119756,167,20,325035,1,-,o,-
+2020/12/21 02:58:39.761  ,1,27e71254-30c3-4b89-b498-fe1e21cf1cab,-,1608487118043,1608487119761,1718,21,40,4,-,o,-
+2020/12/21 02:58:39.808  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487109592,1608487119808,10216,44,26,4,-,o,-
+2020/12/21 02:58:39.871  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487119589,1608487119871,282,12,18,4,-,o,-
+2020/12/21 02:58:39.871  ,1,27e71254-30c3-4b89-b498-fe1e21cf1cab,-,1608487119230,1608487119871,641,21,40,4,-,o,-
+2020/12/21 02:58:39.886  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487113606,1608487119886,6280,1,39,3,-,o,-
+2020/12/21 02:58:39.917  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487110795,1608487119917,9122,44,26,4,-,o,-
+2020/12/21 02:58:40.042  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487111951,1608487120042,8091,44,26,4,-,o,-
+2020/12/21 02:58:40.042  ,2,60867885-4821-4779-8578-664501167a4c,27,1608487115934,1608487120042,4108,6,31,4,1,o,-
+2020/12/21 02:58:40.058  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487119808,1608487120068,260,15,943650,1,-,o,-
+2020/12/21 02:58:40.058  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487119886,1608487120068,182,39,587160,1,-,o,-
+2020/12/21 02:58:40.058  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487113497,1608487120058,6561,30,44,4,-,o,-
+2020/12/21 02:58:40.058  ,1,7d97451e-0d57-46b9-91c8-e115998dba08,-,1608487107374,1608487120058,12684,24,7,3,-,o,-
+2020/12/21 02:58:40.058  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487120058,6858,39,587160,5,1,o,-
+2020/12/21 02:58:40.089  ,13,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,-,1608487119886,1608487120099,213,49,880740,2,-,x,-
+2020/12/21 02:58:40.152  ,1,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,-,1608487114325,1608487120152,5827,44,26,4,-,o,-
+2020/12/21 02:58:40.230  ,1,ea144cf0-b4dd-40d4-a2b3-46d5568e67f9,-,1608487115512,1608487120230,4718,38,48,4,-,o,-
+2020/12/21 02:58:40.230  ,13,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,-,1608487120058,1608487120240,182,44,419400,2,-,o,-
+2020/12/21 02:58:40.370  ,1,4edb4289-3fad-4547-885f-5d4ccd32d1c7,-,1608487118137,1608487120370,2233,22,27,3,-,o,-
+2020/12/21 02:58:40.370  ,2,2eb9f127-e44b-47ea-8c7a-87cf307caf7b,100,1608487103734,1608487120370,16636,22,12,4,1,o,-
+2020/12/21 02:58:40.370  ,1,41c71b01-bf58-40bc-85a6-dd9144023571,-,1608487113294,1608487120370,7076,16,8,4,-,o,-
+2020/12/21 02:58:40.417  ,13,60867885-4821-4779-8578-664501167a4c,-,1608487120089,1608487120427,338,6,943650,1,-,o,-
+2020/12/21 02:58:40.417  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487117902,1608487120417,2515,30,26,4,-,o,-
+2020/12/21 02:58:40.480  ,13,9355d592-6aa2-4b8d-b0a9-9d58821157c6,-,1608487120370,1608487120490,120,5,398430,1,-,o,-
+2020/12/21 02:58:40.574  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487120370,1608487120574,204,8,18,2,-,o,-
+2020/12/21 02:58:40.574  ,2,126be6e6-802b-4428-a473-55b3967c5d20,75,1608487102734,1608487120574,17840,13,41,5,3,o,-
+2020/12/21 02:58:40.589  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487119589,1608487120589,1000,23,13,5,-,o,-
+2020/12/21 02:58:40.636  ,1,ced76fa2-2613-4442-8673-4e685c57175c,-,1608487120370,1608487120636,266,3,36,2,-,o,-
+2020/12/21 02:58:40.636  ,1,f55d2f93-d8de-4309-a074-f37d9f86645f,-,1608487120042,1608487120636,594,29,40,4,-,o,-
+2020/12/21 02:58:40.745  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487119324,1608487120745,1421,33,23,6,-,o,-
+2020/12/21 02:58:40.777  ,1,5d578b63-de09-47bb-8c6b-0414e22cd260,-,1608487111404,1608487120777,9373,7,25,4,-,o,-
+2020/12/21 02:58:40.777  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487114512,1608487120777,6265,48,45,4,-,o,-
+2020/12/21 02:58:40.824  ,2,bba6337b-59f5-4f1f-8d7c-780cb7711bad,81,1608487105062,1608487120824,15762,48,13,5,3,o,-
+2020/12/21 02:58:40.902  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487120745,1608487120902,157,12,18,4,-,o,-
+2020/12/21 02:58:41.058  ,1,12d71a39-0918-41f7-a3c5-e706227802a2,-,1608487120589,1608487121058,469,24,19,4,-,o,-
+2020/12/21 02:58:41.089  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487114731,1608487121089,6358,1,39,3,-,o,-
+2020/12/21 02:58:41.089  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487120933,1608487121099,166,15,943650,1,-,o,-
+2020/12/21 02:58:41.089  ,2,62a2cc62-1d35-4485-aff6-1f8d835d8619,92,1608487105843,1608487121089,15246,9,2,5,1,o,-
+2020/12/21 02:58:41.089  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487121089,7889,39,587160,5,1,o,-
+2020/12/21 02:58:41.089  ,1,6d99ffc6-728a-4440-96ac-3e5b5fa35521,-,1608487113388,1608487121089,7701,6,42,2,-,o,-
+2020/12/21 02:58:41.152  ,13,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,-,1608487121089,1608487121162,73,39,587160,1,-,o,-
+2020/12/21 02:58:41.152  ,1,79a20c9d-eb73-4115-9578-58320a312d03,-,1608487121152,-1,-1608487121153,1038015,-,1,-,x,-
+2020/12/21 02:58:41.152  ,1,79a20c9d-eb73-4115-9578-58320a312d03,-,1608487121152,-1,-1608487121153,1038015,-,1,-,x,-
+2020/12/21 02:58:41.261  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487120745,1608487121261,516,23,13,5,-,o,-
+2020/12/21 02:58:41.292  ,13,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487121089,1608487121302,213,42,566190,4,-,x,-
+2020/12/21 02:58:41.308  ,2,9355d592-6aa2-4b8d-b0a9-9d58821157c6,38,1608487111123,1608487121308,10185,5,40,7,1,o,-
+2020/12/21 02:58:41.308  ,1,b667e0eb-2fc4-4889-96d0-0e69f9304b1a,-,1608487115715,1608487121308,5593,0,44,3,-,o,-
+2020/12/21 02:58:41.308  ,13,957c0631-f89c-495e-b484-1d6fdfee4514,-,1608487121089,1608487121318,229,10,901710,3,-,o,-
+2020/12/21 02:58:41.355  ,13,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,-,1608487121308,1608487121365,57,44,429885,1,-,o,-
+2020/12/21 02:58:41.386  ,1,89f0c531-211a-4df8-84d1-aeb1e9c02f92,-,1608487117418,1608487121386,3968,45,48,4,-,o,-
+2020/12/21 02:58:41.386  ,1,7edae520-c27f-46f3-b578-6a72c1330867,-,1608487117481,1608487121386,3905,32,21,4,-,o,-
+2020/12/21 02:58:41.620  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487119933,1608487121620,1687,17,33,4,-,o,-
+2020/12/21 02:58:41.620  ,3,60867885-4821-4779-8578-664501167a4c,27,1608487120417,1608487121620,1203,6,943650,1,1,o,-
+2020/12/21 02:58:41.573  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487117652,1608487121573,3921,41,21,5,-,o,-
+2020/12/21 02:58:41.620  ,1,b9a9b0a9-2892-4124-995a-60f033fc3abe,-,1608487121386,1608487121620,234,48,3,2,-,o,-
+2020/12/21 02:58:41.651  ,1,eba158f0-45b8-41c6-bc0b-8570a3e7a354,-,1608487116356,1608487121651,5295,28,14,3,-,o,-
+2020/12/21 02:58:41.683  ,1,f516cbb4-3aa8-43b5-89f8-c6d78910e661,-,1608487121573,1608487121683,110,8,18,2,-,o,-
+2020/12/21 02:58:41.683  ,1,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487117730,1608487121683,3953,18,37,3,-,o,-
+2020/12/21 02:58:41.730  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487118840,1608487121730,2890,41,21,5,-,o,-
+2020/12/21 02:58:41.839  ,2,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,67,1608487116168,1608487121839,5671,4,14,3,1,o,-
+2020/12/21 02:58:41.839  ,1,4c71e777-d6b5-45c8-9524-70bbadeda4e0,-,1608487119543,1608487121839,2296,37,21,3,-,o,-
+2020/12/21 02:58:41.839  ,1,a73cbbbf-e1a1-4ce4-bfd5-1dd64940158f,-,1608487116637,1608487121839,5202,38,32,4,-,o,-
+2020/12/21 02:58:41.839  ,3,a39ad34a-6c74-4e71-af80-89cc671e47e1,69,1608487119746,1608487121839,2093,20,325035,1,1,o,-
+2020/12/21 02:58:41.917  ,1,54d8fea3-8922-47d3-b4d3-349e0eae9fb4,-,1608487111857,1608487121917,10060,46,25,4,-,o,-
+2020/12/21 02:58:41.948  ,13,79a20c9d-eb73-4115-9578-58320a312d03,-,1608487121651,1608487121958,307,14,1038015,3,-,o,-
+2020/12/21 02:58:42.026  ,1,27e71254-30c3-4b89-b498-fe1e21cf1cab,-,1608487121386,1608487122026,640,21,40,4,-,o,-
+2020/12/21 02:58:42.151  ,13,7edae520-c27f-46f3-b578-6a72c1330867,-,1608487121839,1608487122161,322,32,975105,3,-,o,-
+2020/12/21 02:58:42.183  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487113200,1608487122183,8983,39,587160,6,1,o,-
+2020/12/21 02:58:42.183  ,1,5d26c917-5cc2-4343-b03a-0dba80356584,-,1608487119808,1608487122183,2375,26,29,4,-,o,-
+2020/12/21 02:58:42.214  ,1,ecd25107-a5c7-4ad8-a520-f9047fe9d3d1,-,1608487121089,1608487122214,1125,41,17,5,-,o,-
+2020/12/21 02:58:42.261  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487121683,1608487122261,578,37,13,4,-,o,-
+2020/12/21 02:58:42.323  ,3,9355d592-6aa2-4b8d-b0a9-9d58821157c6,38,1608487120480,1608487122323,1843,5,398430,1,1,o,-
+2020/12/21 02:58:42.323  ,1,6c835606-b32d-4f33-b2cd-8bb18b15fc11,-,1608487121573,1608487122323,750,5,38,4,-,o,-
+2020/12/21 02:58:42.448  ,1,894d5b80-1102-4a26-af28-7c6ffa8fc6d9,-,1608487116356,1608487122448,6092,25,43,4,-,o,-
+2020/12/21 02:58:42.448  ,1,7e82e076-cbd4-4a31-985b-d1183b75f03b,-,1608487116731,1608487122448,5717,30,44,4,-,o,-
+2020/12/21 02:58:42.448  ,1,6b259d4c-adc5-499e-bac0-cb9be098a2bc,-,1608487114637,1608487122448,7811,36,22,2,-,o,-
+2020/12/21 02:58:42.448  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487122151,1608487122458,307,15,943650,1,-,o,-
+2020/12/21 02:58:42.370  ,13,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487121839,1608487122380,541,28,555705,4,-,o,-
+2020/12/21 02:58:42.636  ,1,89f0c531-211a-4df8-84d1-aeb1e9c02f92,-,1608487118543,1608487122636,4093,45,48,4,-,o,-
+2020/12/21 02:58:42.636  ,2,17196616-8177-45b2-b1c6-2597ab578497,40,1608487115715,1608487122636,6921,13,47,3,3,o,-
+2020/12/21 02:58:42.636  ,13,a29d2d98-58d3-4379-b235-03373a1c25dc,-,1608487122448,1608487122646,198,44,167760,3,-,o,-
+2020/12/21 02:58:42.651  ,13,957c0631-f89c-495e-b484-1d6fdfee4514,-,1608487122214,1608487122661,447,10,901710,3,-,o,-
+2020/12/21 02:58:42.667  ,1,b9a9b0a9-2892-4124-995a-60f033fc3abe,-,1608487122636,1608487122667,31,48,3,2,-,o,-
+2020/12/21 02:58:42.667  ,1,d87cf0c1-e300-48f5-88f3-d076642d704c,-,1608487122448,1608487122667,219,43,21,4,-,o,-
+2020/12/21 02:58:42.745  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487121089,1608487122745,1656,17,33,4,-,o,-
+2020/12/21 02:58:42.854  ,2,994206b4-1fd3-48c5-84a6-45f45cedcaf3,41,1608487106358,1608487122854,16496,33,1,5,9,o,-
+2020/12/21 02:58:42.854  ,1,1cf508a2-dc78-4f07-839d-3e34b8469407,-,1608487111404,1608487122854,11450,33,20,2,-,o,-
+2020/12/21 02:58:42.885  ,1,f55d2f93-d8de-4309-a074-f37d9f86645f,-,1608487122183,1608487122885,702,29,40,4,-,o,-
+2020/12/21 02:58:42.932  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487115715,1608487122932,7217,48,45,4,-,o,-
+2020/12/21 02:58:42.932  ,1,aa68194c-0e8a-4afb-8ab8-37f68f399593,-,1608487121089,1608487122932,1843,49,23,3,-,o,-
+2020/12/21 02:58:43.167  ,2,cbde21b2-6cda-432d-9b83-7819b2fa5a54,41,1608487115059,1608487123167,8108,35,28,4,1,o,-
+2020/12/21 02:58:43.229  ,1,12d71a39-0918-41f7-a3c5-e706227802a2,-,1608487122854,1608487123229,375,24,19,4,-,o,-
+2020/12/21 02:58:43.276  ,1,62a2cc62-1d35-4485-aff6-1f8d835d8619,-,1608487107467,1608487123276,15809,9,2,3,-,o,-
+2020/12/21 02:58:43.276  ,1,dc407480-e31d-494a-a2e8-43ba71fdb545,-,1608487117902,1608487123276,5374,1,39,3,-,o,-
+2020/12/21 02:58:43.292  ,1,b5fe0bbd-d2f1-4e32-b137-ab92dbf832b0,-,1608487122932,1608487123292,360,12,18,4,-,o,-
+2020/12/21 02:58:43.339  ,13,63452d5c-261d-4444-b807-af219da8bdb6,-,1608487122964,1608487123349,385,28,492795,4,-,x,-
+2020/12/21 02:58:43.339  ,13,90f4b429-249f-4d0c-afce-4ebfd7fd7622,-,1608487122448,1608487123349,901,9,461340,6,-,x,-
+2020/12/21 02:58:43.339  ,1,129e041f-f175-4198-9f1d-c4086e7e84e4,-,1608487122932,1608487123339,407,23,13,5,-,o,-
+2020/12/21 02:58:43.557  ,13,89f0c531-211a-4df8-84d1-aeb1e9c02f92,-,1608487122932,1608487123567,635,45,461340,3,-,o,-
+2020/12/21 02:58:43.698  ,1,14173805-e6a5-47cd-8a7c-cde8f1e44d42,-,1608487108655,1608487123698,15043,13,46,5,-,o,-
+2020/12/21 02:58:43.698  ,1,8888ef11-d6f0-4147-a67b-e7190ae0910b,-,1608487123276,1608487123698,422,39,40,4,-,o,-
+2020/12/21 02:58:43.698  ,1,b667e0eb-2fc4-4889-96d0-0e69f9304b1a,-,1608487117902,1608487123698,5796,0,44,3,-,o,-
+2020/12/21 02:58:43.745  ,3,ab63a2cc-9fba-4941-b7a3-6f58b3fa5059,46,1608487115731,1608487123745,8014,13,335520,3,3,o,-
+2020/12/21 02:58:43.760  ,1,4edb4289-3fad-4547-885f-5d4ccd32d1c7,-,1608487122448,1608487123760,1312,22,27,3,-,o,-
+2020/12/21 02:58:43.760  ,1,89f0c531-211a-4df8-84d1-aeb1e9c02f92,-,1608487120777,1608487123760,2983,45,48,4,-,o,-
+2020/12/21 02:58:43.885  ,1,eba158f0-45b8-41c6-bc0b-8570a3e7a354,-,1608487118527,1608487123885,5358,28,14,3,-,o,-
+2020/12/21 02:58:43.885  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487122214,1608487123885,1671,17,33,4,-,o,-
+2020/12/21 02:58:43.885  ,2,daf04612-1768-447d-bae8-de742bb67e48,40,1608487119058,1608487123885,4827,34,48,4,1,o,-
+2020/12/21 02:58:43.916  ,1,b9a9b0a9-2892-4124-995a-60f033fc3abe,-,1608487123760,1608487123916,156,48,3,2,-,o,-
+2020/12/21 02:58:43.995  ,1,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,-,1608487117762,1608487123995,6233,44,32,3,-,o,-
+2020/12/21 02:58:44.073  ,13,a29d2d98-58d3-4379-b235-03373a1c25dc,-,1608487123698,1608487124083,385,44,188730,2,-,o,-
+2020/12/21 02:58:44.120  ,1,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487121917,1608487124120,2203,25,23,3,-,o,-
+2020/12/21 02:58:44.120  ,1,54d8fea3-8922-47d3-b4d3-349e0eae9fb4,-,1608487113013,1608487124120,11107,46,25,4,-,o,-
+2020/12/21 02:58:44.198  ,1,0156ce64-85fc-4488-b6d7-59dacea99f5d,-,1608487114466,1608487124198,9732,21,30,5,-,o,-
+2020/12/21 02:58:44.229  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487123760,1608487124239,479,8,314550,2,-,o,-
+2020/12/21 02:58:44.291  ,1,b3e07001-c756-48bc-b04b-039ec9399ce5,-,1608487113497,1608487124291,10794,31,42,3,-,o,-
+2020/12/21 02:58:44.354  ,1,822b82a8-e71b-4e34-8ab3-6dcc6ca9fda3,-,1608487116543,1608487124354,7811,10,7,3,-,o,-
+2020/12/21 02:58:44.463  ,13,79a20c9d-eb73-4115-9578-58320a312d03,-,1608487123885,1608487124473,588,14,1038015,3,-,o,-
+2020/12/21 02:58:44.510  ,1,6c835606-b32d-4f33-b2cd-8bb18b15fc11,-,1608487122698,1608487124510,1812,5,38,4,-,o,-
+2020/12/21 02:58:44.557  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487124198,1608487124557,359,30,26,4,-,o,-
+2020/12/21 02:58:44.557  ,13,12d71a39-0918-41f7-a3c5-e706227802a2,-,1608487123995,1608487124567,572,24,1027530,3,-,o,-
+2020/12/21 02:58:44.557  ,1,82612e73-6284-485f-b1e8-2ea894953de1,-,1608487124120,1608487124557,437,23,31,3,-,o,-
+2020/12/21 02:58:44.666  ,13,7edae520-c27f-46f3-b578-6a72c1330867,-,1608487123995,1608487124676,681,32,975105,3,-,x,-
+2020/12/21 02:58:44.682  ,13,dee1b6a5-b47d-4c09-9b02-f0449f1103d6,-,1608487124291,1608487124692,401,42,566190,4,-,x,-
+2020/12/21 02:58:44.760  ,2,b667e0eb-2fc4-4889-96d0-0e69f9304b1a,45,1608487121308,1608487124760,3452,0,44,4,1,o,-
+2020/12/21 02:58:44.776  ,13,5d26c917-5cc2-4343-b03a-0dba80356584,-,1608487124510,1608487124786,276,6,356490,4,-,o,-
+2020/12/21 02:58:44.854  ,13,957c0631-f89c-495e-b484-1d6fdfee4514,-,1608487124354,1608487124864,510,10,901710,3,-,o,-
+2020/12/21 02:58:44.947  ,2,b667e0eb-2fc4-4889-96d0-0e69f9304b1a,45,1608487121308,1608487124947,3639,0,44,4,1,o,-
+2020/12/21 02:58:45.135  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487116887,1608487125135,8248,48,45,4,-,o,-
+2020/12/21 02:58:45.182  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487124916,1608487125192,276,8,314550,2,-,o,-
+2020/12/21 02:58:45.307  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487125307,1608487125317,10,15,943650,1,-,o,-
+2020/12/21 02:58:45.354  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487121620,1608487125354,3734,33,23,6,-,o,-
+2020/12/21 02:58:45.369  ,1,ecd25107-a5c7-4ad8-a520-f9047fe9d3d1,-,1608487122214,1608487125369,3155,41,17,5,-,o,-
+2020/12/21 02:58:45.369  ,1,5d26c917-5cc2-4343-b03a-0dba80356584,-,1608487122261,1608487125369,3108,6,29,5,-,o,-
+2020/12/21 02:58:45.619  ,1,82612e73-6284-485f-b1e8-2ea894953de1,-,1608487125354,1608487125619,265,23,31,3,-,o,-
+2020/12/21 02:58:45.588  ,13,aa68194c-0e8a-4afb-8ab8-37f68f399593,-,1608487125369,1608487125598,229,49,933165,2,-,o,-
+2020/12/21 02:58:45.635  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487123760,1608487125635,1875,27,0,6,-,o,-
+2020/12/21 02:58:45.682  ,1,e662a223-1aef-4336-bfa8-fd3c0b2a0bbf,-,1608487125135,1608487125682,547,45,35,4,-,o,-
+2020/12/21 02:58:45.697  ,1,8a160e27-26cd-4edc-b19b-a7afa0c88102,-,1608487125369,1608487125697,328,29,10,5,-,o,-
+2020/12/21 02:58:45.776  ,1,aad7e697-1d1b-4d8a-8556-27d4b45e3a18,-,1608487118340,1608487125776,7436,46,43,3,-,o,-
+2020/12/21 02:58:45.838  ,1,8888ef11-d6f0-4147-a67b-e7190ae0910b,-,1608487125416,1608487125838,422,39,40,4,-,o,-
+2020/12/21 02:58:45.885  ,1,b667e0eb-2fc4-4889-96d0-0e69f9304b1a,-,1608487119027,1608487125885,6858,0,44,3,-,o,-
+2020/12/21 02:58:45.885  ,1,93640704-622f-45a9-83ce-5092584ebaf8,-,1608487122854,1608487125885,3031,20,5,2,-,o,-
+2020/12/21 02:58:45.947  ,13,a29d2d98-58d3-4379-b235-03373a1c25dc,-,1608487125885,1608487125957,72,44,230670,1,-,o,-
+2020/12/21 02:58:46.025  ,1,e418a937-e75c-450d-b2aa-fd3b393efc1c,-,1608487111248,1608487126025,14777,35,20,4,-,o,-
+2020/12/21 02:58:46.025  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487125369,1608487126025,656,17,33,4,-,o,-
+2020/12/21 02:58:46.119  ,1,d87cf0c1-e300-48f5-88f3-d076642d704c,-,1608487125776,1608487126119,343,43,21,4,-,o,-
+2020/12/21 02:58:46.228  ,1,b9a9b0a9-2892-4124-995a-60f033fc3abe,-,1608487125932,1608487126228,296,48,3,2,-,o,-
+2020/12/21 02:58:46.244  ,13,7b69fd08-dccc-4e2f-9e89-b66ea46f95e6,-,1608487126025,1608487126254,229,20,31455,1,-,o,-
+2020/12/21 02:58:46.369  ,1,a73cbbbf-e1a1-4ce4-bfd5-1dd64940158f,-,1608487117762,1608487126369,8607,38,32,4,-,o,-
+2020/12/21 02:58:46.369  ,1,5d578b63-de09-47bb-8c6b-0414e22cd260,-,1608487114637,1608487126369,11732,7,25,4,-,o,-
+2020/12/21 02:58:46.369  ,1,110858e3-691c-42c2-bc9a-62a0dee185ef,-,1608487118137,1608487126369,8232,27,45,2,-,o,-
+2020/12/21 02:58:46.432  ,1,b52382ce-d76f-4047-9a7e-9d877a9a5d95,-,1608487106858,1608487126432,19574,29,2,3,-,o,-
+2020/12/21 02:58:46.541  ,2,aa68194c-0e8a-4afb-8ab8-37f68f399593,28,1608487122932,1608487126541,3609,49,23,3,1,o,-
+2020/12/21 02:58:46.541  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487122745,1608487126541,3796,33,23,6,-,o,-
+2020/12/21 02:58:46.557  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487126041,1608487126567,526,8,314550,2,-,o,-
+2020/12/21 02:58:46.588  ,1,822b82a8-e71b-4e34-8ab3-6dcc6ca9fda3,-,1608487117730,1608487126588,8858,10,7,3,-,o,-
+2020/12/21 02:58:46.635  ,2,dba5a7d9-18f3-408e-948a-97776ec4ef8a,54,1608487116356,1608487126635,10279,31,31,7,1,o,-
+2020/12/21 02:58:46.760  ,1,82612e73-6284-485f-b1e8-2ea894953de1,-,1608487126541,1608487126760,219,23,31,3,-,o,-
+2020/12/21 02:58:46.807  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487124916,1608487126807,1891,27,0,6,-,o,-
+2020/12/21 02:58:46.900  ,1,e662a223-1aef-4336-bfa8-fd3c0b2a0bbf,-,1608487126369,1608487126900,531,45,35,4,-,o,-
+2020/12/21 02:58:47.103  ,13,7edae520-c27f-46f3-b578-6a72c1330867,-,1608487126369,1608487127113,744,32,975105,3,-,x,-
+2020/12/21 02:58:47.103  ,1,08ba2d78-13e3-4813-9bc9-9540e1146f41,-,1608487126432,1608487127103,671,2,9,5,-,o,-
+2020/12/21 02:58:47.103  ,1,8768538c-8b34-4c06-8b48-4f4deb8adcba,-,1608487126025,1608487127103,1078,33,28,4,-,o,-
+2020/12/21 02:58:47.119  ,13,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487126369,1608487127129,760,25,251640,2,-,o,-
+2020/12/21 02:58:47.322  ,1,bcfdc39e-4df0-46db-a252-6bc25570e20d,-,1608487126728,1608487127322,594,6,13,4,-,o,-
+2020/12/21 02:58:47.338  ,13,12d71a39-0918-41f7-a3c5-e706227802a2,-,1608487127166,1608487127348,182,24,1038015,2,-,o,-
+2020/12/21 02:58:47.447  ,1,4e249c3f-0fb4-4edc-b861-d7f1f69e2580,-,1608487126432,1608487127447,1015,42,1,6,-,o,-
+2020/12/21 02:58:47.603  ,1,54d8fea3-8922-47d3-b4d3-349e0eae9fb4,-,1608487117215,1608487127603,10388,46,25,4,-,o,-
+2020/12/21 02:58:47.603  ,1,ecd25107-a5c7-4ad8-a520-f9047fe9d3d1,-,1608487123339,1608487127603,4264,41,17,5,-,o,-
+2020/12/21 02:58:47.603  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487119058,1608487127603,8545,48,45,4,-,o,-
+2020/12/21 02:58:47.603  ,1,a73cbbbf-e1a1-4ce4-bfd5-1dd64940158f,-,1608487120058,1608487127603,7545,38,32,4,-,o,-
+2020/12/21 02:58:47.666  ,1,aa68194c-0e8a-4afb-8ab8-37f68f399593,-,1608487123229,1608487127666,4437,49,23,3,-,o,-
+2020/12/21 02:58:47.728  ,1,822b82a8-e71b-4e34-8ab3-6dcc6ca9fda3,-,1608487118855,1608487127728,8873,10,7,3,-,o,-
+2020/12/21 02:58:47.822  ,1,adaaf094-3152-4e81-8c94-50d4f534f42b,-,1608487127666,1608487127822,156,23,37,2,-,o,-
+2020/12/21 02:58:47.822  ,13,e662a223-1aef-4336-bfa8-fd3c0b2a0bbf,-,1608487127603,1608487127832,229,45,1038015,3,-,o,-
+2020/12/21 02:58:47.869  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487127166,1608487127879,713,8,314550,2,-,o,-
+2020/12/21 02:58:47.931  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487127103,1608487127931,828,27,0,6,-,o,-
+2020/12/21 02:58:47.978  ,1,8768538c-8b34-4c06-8b48-4f4deb8adcba,-,1608487127150,1608487127978,828,33,28,4,-,o,-
+2020/12/21 02:58:48.119  ,1,f3515ec8-5d58-4dc1-bfc1-41cf2f5b52a4,-,1608487124510,1608487128119,3609,38,5,5,-,o,-
+2020/12/21 02:58:48.119  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487127603,1608487128119,516,49,28,4,-,o,-
+2020/12/21 02:58:48.165  ,1,4e249c3f-0fb4-4edc-b861-d7f1f69e2580,-,1608487127603,1608487128165,562,42,1,6,-,o,-
+2020/12/21 02:58:48.165  ,1,e418a937-e75c-450d-b2aa-fd3b393efc1c,-,1608487112372,1608487128165,15793,35,20,4,-,o,-
+2020/12/21 02:58:48.322  ,13,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487127603,1608487128332,729,25,251640,2,-,o,-
+2020/12/21 02:58:48.322  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487127603,1608487128322,719,17,33,4,-,o,-
+2020/12/21 02:58:48.337  ,13,0f55b1e7-610b-4a04-8054-a3da47694836,-,1608487128165,1608487128347,182,20,241155,2,-,x,-
+2020/12/21 02:58:48.431  ,1,bcfdc39e-4df0-46db-a252-6bc25570e20d,-,1608487127853,1608487128431,578,6,13,4,-,o,-
+2020/12/21 02:58:48.431  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487119558,1608487128431,8873,34,30,4,-,o,-
+2020/12/21 02:58:48.619  ,1,b52382ce-d76f-4047-9a7e-9d877a9a5d95,-,1608487109061,1608487128619,19558,29,2,3,-,o,-
+2020/12/21 02:58:48.619  ,2,dacadbbb-a821-444c-9a10-be0a334ea351,94,1608487121683,1608487128619,6936,18,37,3,1,o,-
+2020/12/21 02:58:48.712  ,13,5a3553e8-4917-4548-a777-c62b3493e057,-,1608487128619,1608487128722,103,15,943650,1,-,o,-
+2020/12/21 02:58:48.712  ,2,110858e3-691c-42c2-bc9a-62a0dee185ef,40,1608487126369,1608487128712,2343,27,45,2,1,o,-
+2020/12/21 02:58:48.712  ,1,6b259d4c-adc5-499e-bac0-cb9be098a2bc,-,1608487121167,1608487128712,7545,0,22,4,-,o,-
+2020/12/21 02:58:48.712  ,1,8768538c-8b34-4c06-8b48-4f4deb8adcba,-,1608487128322,1608487128712,390,33,28,4,-,o,-
+2020/12/21 02:58:48.712  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487128431,1608487128712,281,30,26,4,-,o,-
+2020/12/21 02:58:48.728  ,1,5d578b63-de09-47bb-8c6b-0414e22cd260,-,1608487118840,1608487128728,9888,7,25,4,-,o,-
+2020/12/21 02:58:48.728  ,1,a73cbbbf-e1a1-4ce4-bfd5-1dd64940158f,-,1608487122323,1608487128728,6405,38,32,4,-,o,-
+2020/12/21 02:58:48.931  ,1,6c835606-b32d-4f33-b2cd-8bb18b15fc11,-,1608487125885,1608487128931,3046,5,38,4,-,o,-
+2020/12/21 02:58:48.978  ,2,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,87,1608487114387,1608487128978,14591,44,26,9,4,o,-
+2020/12/21 02:58:49.212  ,1,e662a223-1aef-4336-bfa8-fd3c0b2a0bbf,-,1608487129212,-1,-1608487129213,1038015,-,1,-,x,-
+2020/12/21 02:58:49.212  ,1,e662a223-1aef-4336-bfa8-fd3c0b2a0bbf,-,1608487129212,-1,-1608487129213,1038015,-,1,-,x,-
+2020/12/21 02:58:49.259  ,13,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487128728,1608487129238,510,25,251640,2,-,o,-
+2020/12/21 02:58:49.322  ,13,4e249c3f-0fb4-4edc-b861-d7f1f69e2580,-,1608487128728,1608487129332,604,42,849285,5,-,o,-
+2020/12/21 02:58:49.337  ,3,7b69fd08-dccc-4e2f-9e89-b66ea46f95e6,79,1608487126244,1608487129337,3093,20,31455,1,1,o,-
+2020/12/21 02:58:49.369  ,13,4edb4289-3fad-4547-885f-5d4ccd32d1c7,-,1608487128712,1608487129379,667,22,335520,2,-,o,-
+2020/12/21 02:58:49.369  ,13,08ba2d78-13e3-4813-9bc9-9540e1146f41,-,1608487128619,1608487129379,760,2,891225,4,-,o,-
+2020/12/21 02:58:49.447  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487128728,1608487129447,719,17,33,4,-,o,-
+2020/12/21 02:58:49.556  ,1,8888ef11-d6f0-4147-a67b-e7190ae0910b,-,1608487128619,1608487129556,937,39,40,4,-,o,-
+2020/12/21 02:58:49.634  ,1,5d26c917-5cc2-4343-b03a-0dba80356584,-,1608487123385,1608487129634,6249,6,29,5,-,o,-
+2020/12/21 02:58:49.759  ,1,110858e3-691c-42c2-bc9a-62a0dee185ef,-,1608487120370,1608487129759,9389,27,45,2,-,o,-
+2020/12/21 02:58:49.806  ,1,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487124120,1608487129806,5686,25,23,3,-,o,-
+2020/12/21 02:58:49.837  ,1,6b259d4c-adc5-499e-bac0-cb9be098a2bc,-,1608487122308,1608487129837,7529,0,22,4,-,o,-
+2020/12/21 02:58:49.962  ,13,12d71a39-0918-41f7-a3c5-e706227802a2,-,1608487129337,1608487129972,635,24,1038015,2,-,o,-
+2020/12/21 02:58:49.962  ,1,87ee1fc6-9221-45ab-a9b6-570f4addd5a0,-,1608487125635,1608487129962,4327,0,32,6,-,o,-
+2020/12/21 02:58:49.962  ,1,5d578b63-de09-47bb-8c6b-0414e22cd260,-,1608487120058,1608487129962,9904,7,25,4,-,o,-
+2020/12/21 02:58:49.978  ,1,adaaf094-3152-4e81-8c94-50d4f534f42b,-,1608487129806,1608487129978,172,23,37,2,-,o,-
+2020/12/21 02:58:50.071  ,13,4edb4289-3fad-4547-885f-5d4ccd32d1c7,-,1608487129837,1608487130081,244,22,335520,2,-,o,-
+2020/12/21 02:58:50.071  ,1,5d578b63-de09-47bb-8c6b-0414e22cd260,-,1608487124354,1608487130071,5717,7,25,4,-,o,-
+2020/12/21 02:58:50.087  ,13,8a160e27-26cd-4edc-b19b-a7afa0c88102,-,1608487129634,1608487130097,463,29,775890,4,-,o,-
+2020/12/21 02:58:50.149  ,1,6c835606-b32d-4f33-b2cd-8bb18b15fc11,-,1608487128119,1608487130149,2030,5,38,4,-,o,-
+2020/12/21 02:58:50.149  ,1,d259596d-a3f9-419c-9019-261f4d0059f9,-,1608487128119,1608487130149,2030,14,0,3,-,o,-
+2020/12/21 02:58:50.259  ,1,f3515ec8-5d58-4dc1-bfc1-41cf2f5b52a4,-,1608487125682,1608487130259,4577,38,5,5,-,o,-
+2020/12/21 02:58:50.290  ,1,82c0d2ca-786d-4bfe-ac5f-5f279b0bd597,-,1608487129759,1608487130290,531,15,41,4,-,o,-
+2020/12/21 02:58:50.415  ,13,8c3368fe-8d22-40a9-afdc-8b0a754e819e,-,1608487129962,1608487130425,463,25,251640,2,-,o,-
+2020/12/21 02:58:50.415  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487129759,1608487130415,656,49,28,4,-,o,-
+2020/12/21 02:58:50.556  ,1,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,-,1608487130149,1608487130556,407,0,44,3,-,o,-
+2020/12/21 02:58:51.087  ,1,87ee1fc6-9221-45ab-a9b6-570f4addd5a0,-,1608487126807,1608487131087,4280,0,32,6,-,o,-
+2020/12/21 02:58:51.180  ,1,8888ef11-d6f0-4147-a67b-e7190ae0910b,-,1608487130774,1608487131180,406,39,40,4,-,o,-
+2020/12/21 02:58:51.180  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487130415,1608487131190,775,8,314550,2,-,o,-
+2020/12/21 02:58:51.259  ,13,bcfdc39e-4df0-46db-a252-6bc25570e20d,-,1608487131040,1608487131269,229,6,838800,3,-,o,-
+2020/12/21 02:58:51.259  ,1,82c0d2ca-786d-4bfe-ac5f-5f279b0bd597,-,1608487130884,1608487131259,375,15,41,4,-,o,-
+2020/12/21 02:58:51.430  ,1,f3515ec8-5d58-4dc1-bfc1-41cf2f5b52a4,-,1608487128931,1608487131430,2499,38,5,5,-,o,-
+2020/12/21 02:58:51.430  ,1,e418a937-e75c-450d-b2aa-fd3b393efc1c,-,1608487113497,1608487131430,17933,35,20,4,-,o,-
+2020/12/21 02:58:51.446  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487130884,1608487131446,562,49,28,4,-,o,-
+2020/12/21 02:58:51.477  ,1,b90e3d61-9356-43a5-b001-8b2bbd69a62f,-,1608487130149,1608487131477,1328,38,24,4,-,o,-
+2020/12/21 02:58:51.618  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487129759,1608487131618,1859,45,33,3,-,o,-
+2020/12/21 02:58:51.727  ,1,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,-,1608487131337,1608487131727,390,0,44,3,-,o,-
+2020/12/21 02:58:51.837  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487131618,1608487131837,219,30,26,4,-,o,-
+2020/12/21 02:58:51.837  ,2,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,41,1608487102734,1608487131837,29103,31,38,4,1,o,-
+2020/12/21 02:58:51.837  ,1,b52382ce-d76f-4047-9a7e-9d877a9a5d95,-,1608487112310,1608487131837,19527,29,2,3,-,o,-
+2020/12/21 02:58:51.946  ,1,f047fee9-614c-463b-aac0-563b3c15f37c,-,1608487123885,1608487131946,8061,33,23,6,-,o,-
+2020/12/21 02:58:51.946  ,1,2cfba859-f1f2-4ea2-a0ae-774e55f91350,-,1608487120230,1608487131946,11716,48,45,4,-,o,-
+2020/12/21 02:58:52.055  ,1,894d5b80-1102-4a26-af28-7c6ffa8fc6d9,-,1608487118527,1608487132055,13528,25,43,4,-,o,-
+2020/12/21 02:58:52.165  ,1,adaaf094-3152-4e81-8c94-50d4f534f42b,-,1608487131946,1608487132165,219,23,37,2,-,o,-
+2020/12/21 02:58:52.180  ,2,dafa01da-0685-42db-beae-7c640eb514d6,60,1608487108655,1608487132180,23525,40,18,7,1,o,-
+2020/12/21 02:58:52.212  ,1,87ee1fc6-9221-45ab-a9b6-570f4addd5a0,-,1608487127931,1608487132212,4281,0,32,6,-,o,-
+2020/12/21 02:58:52.274  ,1,d87cf0c1-e300-48f5-88f3-d076642d704c,-,1608487132055,1608487132274,219,43,21,4,-,o,-
+2020/12/21 02:58:52.274  ,13,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487131837,1608487132284,447,12,555705,3,-,o,-
+2020/12/21 02:58:52.383  ,13,08ba2d78-13e3-4813-9bc9-9540e1146f41,-,1608487131837,1608487132393,556,2,891225,4,-,o,-
+2020/12/21 02:58:52.383  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487132055,1608487132383,328,49,28,4,-,o,-
+2020/12/21 02:58:52.461  ,1,d259596d-a3f9-419c-9019-261f4d0059f9,-,1608487131337,1608487132461,1124,14,0,3,-,o,-
+2020/12/21 02:58:52.493  ,13,4e249c3f-0fb4-4edc-b861-d7f1f69e2580,-,1608487132055,1608487132503,448,42,849285,5,-,x,-
+2020/12/21 02:58:52.758  ,1,88f15ae5-9686-421f-b75a-3e2820cf33cd,-,1608487129962,1608487132758,2796,17,33,4,-,o,-
+2020/12/21 02:58:52.899  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487132555,1608487132909,354,8,314550,2,-,o,-
+2020/12/21 02:58:52.915  ,13,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,-,1608487132461,1608487132925,464,0,94365,2,-,o,-
+2020/12/21 02:58:52.961  ,1,b52382ce-d76f-4047-9a7e-9d877a9a5d95,-,1608487113450,1608487132961,19511,29,2,3,-,o,-
+2020/12/21 02:58:53.102  ,1,2349bc6e-5bb5-4d55-800d-51dec830a00e,-,1608487125135,1608487133102,7967,12,23,3,-,o,-
+2020/12/21 02:58:53.102  ,1,1cb94055-4080-4cb0-ae7f-f7476ec31eac,-,1608487132102,1608487133102,1000,17,15,5,-,o,-
+2020/12/21 02:58:53.196  ,1,aad7e697-1d1b-4d8a-8556-27d4b45e3a18,-,1608487119480,1608487133196,13716,46,43,3,-,o,-
+2020/12/21 02:58:53.274  ,13,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487132961,1608487133284,323,12,555705,3,-,o,-
+2020/12/21 02:58:53.321  ,1,82c0d2ca-786d-4bfe-ac5f-5f279b0bd597,-,1608487133102,1608487133321,219,15,41,4,-,o,-
+2020/12/21 02:58:53.383  ,1,8888ef11-d6f0-4147-a67b-e7190ae0910b,-,1608487132961,1608487133383,422,39,40,4,-,o,-
+2020/12/21 02:58:53.602  ,1,6a051540-f391-45a6-b01e-8a98cc409a99,-,1608487133102,1608487133602,500,23,5,5,-,o,-
+2020/12/21 02:58:53.711  ,1,b90e3d61-9356-43a5-b001-8b2bbd69a62f,-,1608487132352,1608487133711,1359,38,24,4,-,o,-
+2020/12/21 02:58:53.711  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487133196,1608487133711,515,49,28,4,-,o,-
+2020/12/21 02:58:53.789  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487133196,1608487133789,593,43,13,6,-,o,-
+2020/12/21 02:58:53.821  ,1,75ae9ed1-317e-49e1-9ca6-521b2f0b5bfa,-,1608487133196,1608487133821,625,42,21,6,-,o,-
+2020/12/21 02:58:53.867  ,1,2788b3ee-4ff1-490b-98cd-7f21e916e73b,-,1608487131477,1608487133867,2390,24,29,2,-,o,-
+2020/12/21 02:58:53.883  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487131946,1608487133883,1937,45,33,3,-,o,-
+2020/12/21 02:58:54.039  ,13,dacadbbb-a821-444c-9a10-be0a334ea351,-,1608487133711,1608487134049,338,8,314550,2,-,o,-
+2020/12/21 02:58:54.039  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487133774,1608487134039,265,30,26,4,-,o,-
+2020/12/21 02:58:54.117  ,1,6b259d4c-adc5-499e-bac0-cb9be098a2bc,-,1608487124510,1608487134117,9607,0,22,4,-,o,-
+2020/12/21 02:58:54.117  ,2,51884a65-edff-4a90-b5a6-96a0e163c546,37,1608487114637,1608487134117,19480,40,36,5,1,o,-
+2020/12/21 02:58:54.117  ,1,110858e3-691c-42c2-bc9a-62a0dee185ef,-,1608487121573,1608487134117,12544,27,45,2,-,o,-
+2020/12/21 02:58:54.211  ,13,8a160e27-26cd-4edc-b19b-a7afa0c88102,-,1608487133867,1608487134221,354,29,775890,4,-,o,-
+2020/12/21 02:58:54.227  ,1,2349bc6e-5bb5-4d55-800d-51dec830a00e,-,1608487128431,1608487134227,5796,12,23,3,-,o,-
+2020/12/21 02:58:54.320  ,1,894d5b80-1102-4a26-af28-7c6ffa8fc6d9,-,1608487120777,1608487134320,13543,25,43,4,-,o,-
+2020/12/21 02:58:54.430  ,13,4edb4289-3fad-4547-885f-5d4ccd32d1c7,-,1608487134117,1608487134440,323,22,335520,2,-,o,-
+2020/12/21 02:58:54.602  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487131337,1608487134602,3265,27,0,6,-,o,-
+2020/12/21 02:58:54.649  ,1,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487134320,1608487134649,329,49,28,4,-,o,-
+2020/12/21 02:58:54.805  ,1,6a051540-f391-45a6-b01e-8a98cc409a99,-,1608487134227,1608487134805,578,23,5,5,-,o,-
+2020/12/21 02:58:54.914  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487134320,1608487134914,594,43,13,6,-,o,-
+2020/12/21 02:58:55.008  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487134117,1608487135008,891,45,33,3,-,o,-
+2020/12/21 02:58:55.023  ,13,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,-,1608487134602,1608487135033,431,0,94365,2,-,x,-
+2020/12/21 02:58:55.133  ,13,75ae9ed1-317e-49e1-9ca6-521b2f0b5bfa,-,1608487134320,1608487135143,823,42,702495,5,-,o,-
+2020/12/21 02:58:55.336  ,1,2444745c-0318-48fc-84f0-d2730c132c85,-,1608487127603,1608487135336,7733,32,45,3,-,o,-
+2020/12/21 02:58:55.492  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487135336,1608487135492,156,45,33,3,-,o,-
+2020/12/21 02:58:55.601  ,1,1cf508a2-dc78-4f07-839d-3e34b8469407,-,1608487114637,1608487135601,20964,33,20,2,-,o,-
+2020/12/21 02:58:55.757  ,1,d259596d-a3f9-419c-9019-261f4d0059f9,-,1608487132461,1608487135757,3296,14,0,3,-,o,-
+2020/12/21 02:58:55.757  ,13,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487135133,1608487135767,634,12,555705,3,-,o,-
+2020/12/21 02:58:55.789  ,13,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,-,1608487135757,1608487135799,42,0,94365,2,-,x,-
+2020/12/21 02:58:55.851  ,1,f35025cc-6f32-4efd-8688-8505b2bbd92a,-,1608487132555,1608487135851,3296,46,24,4,-,o,-
+2020/12/21 02:58:55.867  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487133477,1608487135867,2390,27,0,6,-,o,-
+2020/12/21 02:58:55.898  ,1,82c0d2ca-786d-4bfe-ac5f-5f279b0bd597,-,1608487135242,1608487135898,656,15,41,4,-,o,-
+2020/12/21 02:58:56.117  ,13,547934ab-f3a7-4407-bd80-6b5b67c1cbeb,-,1608487135601,1608487136127,526,20,566190,4,-,x,-
+2020/12/21 02:58:56.148  ,1,ebe5be71-9647-4568-915a-28534a1dd202,-,1608487113294,1608487136148,22854,4,2,4,-,o,-
+2020/12/21 02:58:56.226  ,1,c5024c3e-8089-4630-9dd6-dfdc2c678be1,-,1608487135617,1608487136226,609,27,0,6,-,o,-
+2020/12/21 02:58:56.273  ,1,910ccb4a-a9ff-4aae-b4c1-17f32df42146,-,1608487135336,1608487136273,937,22,17,4,-,o,-
+2020/12/21 02:58:56.367  ,1,2349bc6e-5bb5-4d55-800d-51dec830a00e,-,1608487129556,1608487136367,6811,12,23,3,-,o,-
+2020/12/21 02:58:56.445  ,2,aad7e697-1d1b-4d8a-8556-27d4b45e3a18,70,1608487125776,1608487136445,10669,46,43,4,1,o,-
+2020/12/21 02:58:56.507  ,1,aad7e697-1d1b-4d8a-8556-27d4b45e3a18,-,1608487123698,1608487136507,12809,46,43,3,-,o,-
+2020/12/21 02:58:56.601  ,1,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487136367,1608487136601,234,15,7,3,-,o,-
+2020/12/21 02:58:56.711  ,13,6a051540-f391-45a6-b01e-8a98cc409a99,-,1608487136367,1608487136721,354,23,62910,4,-,o,-
+2020/12/21 02:58:56.820  ,13,417fe42c-f02a-449c-8e3f-5b518f9da753,-,1608487136507,1608487136830,323,49,366975,3,-,o,-
+2020/12/21 02:58:56.929  ,13,ce9411f3-383b-4896-b5bd-cad7ae9a7b69,-,1608487136257,1608487136939,682,12,555705,3,-,o,-
+2020/12/21 02:58:56.976  ,1,604de72f-2772-4ce1-b4f3-71cc818ea12a,-,1608487133336,1608487136976,3640,32,24,2,-,o,-
+2020/12/21 02:58:57.257  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487136507,1608487137257,750,43,13,6,-,o,-
+2020/12/21 02:58:57.273  ,1,ebe5be71-9647-4568-915a-28534a1dd202,-,1608487117418,1608487137273,19855,34,2,3,-,o,-
+2020/12/21 02:58:57.335  ,13,f35025cc-6f32-4efd-8688-8505b2bbd92a,-,1608487136882,1608487137345,463,46,765405,3,-,o,-
+2020/12/21 02:58:57.367  ,1,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487136976,1608487137367,391,24,3,4,-,o,-
+2020/12/21 02:58:57.570  ,1,2444745c-0318-48fc-84f0-d2730c132c85,-,1608487128728,1608487137570,8842,32,45,3,-,o,-
+2020/12/21 02:58:57.570  ,1,1cb94055-4080-4cb0-ae7f-f7476ec31eac,-,1608487136273,1608487137570,1297,17,15,5,-,o,-
+2020/12/21 02:58:57.632  ,1,aad7e697-1d1b-4d8a-8556-27d4b45e3a18,-,1608487125869,1608487137632,11763,46,43,3,-,o,-
+2020/12/21 02:58:57.726  ,1,70cc0a52-5a5d-4e1e-a4b0-835c9f185396,-,1608487137570,1608487137726,156,23,47,2,-,o,-
+2020/12/21 02:58:57.835  ,1,0f2f9c1d-7cba-436b-bc4e-8c79ba7669f4,-,1608487114637,1608487137835,23198,2,20,3,-,o,-
+2020/12/21 02:58:57.913  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487137570,1608487137913,343,45,33,3,-,o,-
+2020/12/21 02:58:57.944  ,13,75ae9ed1-317e-49e1-9ca6-521b2f0b5bfa,-,1608487137570,1608487137954,384,42,723465,3,-,x,-
+2020/12/21 02:58:57.991  ,1,0f2f9c1d-7cba-436b-bc4e-8c79ba7669f4,-,1608487115778,1608487137991,22213,2,20,3,-,o,-
+2020/12/21 02:58:58.023  ,1,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487137570,1608487138023,453,15,7,3,-,o,-
+2020/12/21 02:58:58.085  ,1,09e9397e-48df-452a-91b4-9bea63373bd4,-,1608487137648,1608487138085,437,14,3,3,-,o,-
+2020/12/21 02:58:58.085  ,1,2788b3ee-4ff1-490b-98cd-7f21e916e73b,-,1608487133711,1608487138085,4374,24,29,2,-,o,-
+2020/12/21 02:58:58.085  ,13,417fe42c-f02a-449c-8e3f-5b518f9da753,-,1608487137632,1608487138095,463,49,366975,3,-,o,-
+2020/12/21 02:58:58.148  ,1,0f2f9c1d-7cba-436b-bc4e-8c79ba7669f4,-,1608487123276,1608487138148,14872,2,20,3,-,o,-
+2020/12/21 02:58:58.194  ,13,10f5507e-d18e-47db-b37a-1b556746dc98,-,1608487137835,1608487138204,369,20,587160,4,-,o,-
+2020/12/21 02:58:58.257  ,1,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487130259,1608487138257,7998,5,20,3,-,o,-
+2020/12/21 02:58:58.398  ,1,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487131430,1608487138398,6968,5,20,3,-,o,-
+2020/12/21 02:58:58.444  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487137632,1608487138444,812,43,13,6,-,o,-
+2020/12/21 02:58:58.507  ,1,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487132555,1608487138507,5952,5,20,3,-,o,-
+2020/12/21 02:58:58.616  ,1,a00caa50-19c1-412d-b206-d104b6e2f0df,-,1608487132961,1608487138616,5655,2,20,4,-,o,-
+2020/12/21 02:58:58.694  ,1,2444745c-0318-48fc-84f0-d2730c132c85,-,1608487129962,1608487138694,8732,32,45,3,-,o,-
+2020/12/21 02:58:58.804  ,1,a00caa50-19c1-412d-b206-d104b6e2f0df,-,1608487136148,1608487138804,2656,2,20,4,-,o,-
+2020/12/21 02:58:58.726  ,1,25b6ef44-b016-4d76-960e-73fa4654d2ab,-,1608487138398,1608487138726,328,12,4,6,-,o,-
+2020/12/21 02:58:58.819  ,1,70cc0a52-5a5d-4e1e-a4b0-835c9f185396,-,1608487138694,1608487138819,125,23,47,2,-,o,-
+2020/12/21 02:58:58.913  ,1,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,-,1608487138694,1608487138913,219,45,33,3,-,o,-
+2020/12/21 02:58:58.913  ,1,a00caa50-19c1-412d-b206-d104b6e2f0df,-,1608487137273,1608487138913,1640,2,20,4,-,o,-
+2020/12/21 02:58:58.991  ,1,3248784e-4831-40ae-8e3e-6cb04563622d,-,1608487138085,1608487138991,906,29,30,5,-,o,-
+2020/12/21 02:58:58.991  ,3,08391954-40c4-4a15-9544-23f77e5c5103,61,1608487105577,1608487138991,33414,15,796860,4,10,o,-
+2020/12/21 02:58:59.022  ,13,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487138694,1608487139032,338,15,681525,2,-,o,-
+2020/12/21 02:58:59.038  ,1,b3e07001-c756-48bc-b04b-039ec9399ce5,-,1608487138851,1608487139038,187,27,42,5,-,o,-
+2020/12/21 02:58:59.100  ,2,604de72f-2772-4ce1-b4f3-71cc818ea12a,42,1608487136976,1608487139100,2124,32,24,2,1,o,-
+2020/12/21 02:58:59.163  ,1,f35025cc-6f32-4efd-8688-8505b2bbd92a,-,1608487134742,1608487139163,4421,46,24,4,-,o,-
+2020/12/21 02:58:59.163  ,2,417fe42c-f02a-449c-8e3f-5b518f9da753,96,1608487118137,1608487139163,21026,36,22,3,1,o,-
+2020/12/21 02:58:59.257  ,13,910ccb4a-a9ff-4aae-b4c1-17f32df42146,-,1608487138585,1608487139267,682,22,1038015,3,-,o,-
+2020/12/21 02:58:59.257  ,13,417fe42c-f02a-449c-8e3f-5b518f9da753,-,1608487138819,1608487139267,448,49,366975,3,-,o,-
+2020/12/21 02:58:59.569  ,1,b80f76db-b5b9-4abb-9526-5864f2d99fc8,-,1608487138991,1608487139569,578,30,26,4,-,o,-
+2020/12/21 02:58:59.679  ,13,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487139163,1608487139689,526,24,587160,3,-,o,-
+2020/12/21 02:58:59.975  ,14,910ccb4a-a9ff-4aae-b4c1-17f32df42146,-,1608487137913,1608487139985,2072,1038015,1027530,9,-,△,-
+2020/12/21 02:59:00.163  ,1,09e9397e-48df-452a-91b4-9bea63373bd4,-,1608487139835,1608487140163,328,14,3,3,-,o,-
+2020/12/21 02:59:00.272  ,1,b98e36fc-d10c-49d2-a57e-b1db1b14de03,-,1608487140038,1608487140272,234,46,34,3,-,o,-
+2020/12/21 02:59:00.288  ,1,604de72f-2772-4ce1-b4f3-71cc818ea12a,-,1608487135492,1608487140288,4796,32,24,2,-,o,-
+2020/12/21 02:59:00.288  ,13,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487139835,1608487140298,463,15,681525,2,-,o,-
+2020/12/21 02:59:00.475  ,1,25b6ef44-b016-4d76-960e-73fa4654d2ab,-,1608487139569,1608487140475,906,12,4,6,-,o,-
+2020/12/21 02:59:00.475  ,1,b3e07001-c756-48bc-b04b-039ec9399ce5,-,1608487139975,1608487140475,500,27,42,5,-,o,-
+2020/12/21 02:59:00.475  ,1,006a2cd5-e8a7-48d0-aab8-dee177ac37ec,-,1608487126588,1608487140444,13856,7,2,5,-,o,-
+2020/12/21 02:59:00.585  ,1,a00caa50-19c1-412d-b206-d104b6e2f0df,-,1608487140444,1608487140585,141,2,20,4,-,o,-
+2020/12/21 02:59:00.788  ,13,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487140288,1608487140798,510,24,587160,3,-,o,-
+2020/12/21 02:59:00.850  ,1,2444745c-0318-48fc-84f0-d2730c132c85,-,1608487131087,1608487140850,9763,32,45,3,-,o,-
+2020/12/21 02:59:00.850  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487129447,1608487140850,11403,33,43,6,-,o,-
+2020/12/21 02:59:01.084  ,1,70cc0a52-5a5d-4e1e-a4b0-835c9f185396,-,1608487140850,1608487141084,234,23,47,2,-,o,-
+2020/12/21 02:59:01.084  ,13,09e9397e-48df-452a-91b4-9bea63373bd4,-,1608487140975,1608487141094,119,14,83880,2,-,o,-
+2020/12/21 02:59:01.522  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487140850,1608487141522,672,43,13,6,-,o,-
+2020/12/21 02:59:01.522  ,1,a70137b1-8bb3-4ab4-8377-af4a46509db6,-,1608487140975,1608487141522,547,49,10,4,-,o,-
+2020/12/21 02:59:01.522  ,2,af07602c-ebbc-4ef8-a285-6998ffcf7c49,64,1608487108936,1608487141522,32586,26,8,5,1,o,-
+2020/12/21 02:59:02.022  ,1,1cb94055-4080-4cb0-ae7f-f7476ec31eac,-,1608487139428,1608487142022,2594,17,15,5,-,o,-
+2020/12/21 02:59:02.022  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487132165,1608487142022,9857,6,45,3,-,o,-
+2020/12/21 02:59:02.022  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487131618,1608487142022,10404,33,43,6,-,o,-
+2020/12/21 02:59:02.162  ,14,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487142131,1608487142172,41,1017045,1038015,2,-,△,-
+2020/12/21 02:59:02.350  ,1,b98e36fc-d10c-49d2-a57e-b1db1b14de03,-,1608487142178,1608487142350,172,46,34,3,-,o,-
+2020/12/21 02:59:02.381  ,1,d2eaf987-e185-41fa-b812-9d3edf3872e2,-,1608487142022,1608487142381,359,38,4,3,-,o,-
+2020/12/21 02:59:02.412  ,1,96c4d7ea-c703-4e73-a481-e7ebec8354d2,-,1608487142022,1608487142412,390,23,5,4,-,o,-
+2020/12/21 02:59:02.412  ,13,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487142022,1608487142422,400,15,681525,2,-,x,-
+2020/12/21 02:59:02.522  ,2,5d26c917-5cc2-4343-b03a-0dba80356584,92,1608487122183,1608487142522,20339,6,29,8,1,o,-
+2020/12/21 02:59:02.522  ,1,b90e3d61-9356-43a5-b001-8b2bbd69a62f,-,1608487135508,1608487142522,7014,38,24,4,-,o,-
+2020/12/21 02:59:02.600  ,1,25b6ef44-b016-4d76-960e-73fa4654d2ab,-,1608487141803,1608487142600,797,12,4,6,-,o,-
+2020/12/21 02:59:02.678  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487142022,1608487142678,656,43,13,6,-,o,-
+2020/12/21 02:59:02.678  ,13,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487142522,1608487142688,166,24,639585,1,-,o,-
+2020/12/21 02:59:02.865  ,2,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,55,1608487138257,1608487142865,4608,5,20,5,1,o,-
+2020/12/21 02:59:02.865  ,1,a20fae36-789b-4b16-b888-ecc1161f3fc6,-,1608487142615,1608487142865,250,17,0,4,-,o,-
+2020/12/21 02:59:03.022  ,2,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,54,1608487137367,1608487143022,5655,24,3,4,1,o,-
+2020/12/21 02:59:03.147  ,1,2444745c-0318-48fc-84f0-d2730c132c85,-,1608487132212,1608487143147,10935,32,45,3,-,o,-
+2020/12/21 02:59:03.303  ,1,96c4d7ea-c703-4e73-a481-e7ebec8354d2,-,1608487143147,1608487143303,156,23,5,4,-,o,-
+2020/12/21 02:59:03.318  ,1,2788b3ee-4ff1-490b-98cd-7f21e916e73b,-,1608487135851,1608487143318,7467,24,29,2,-,o,-
+2020/12/21 02:59:03.318  ,2,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,87,1608487114387,1608487143318,28931,44,26,9,5,o,-
+2020/12/21 02:59:03.412  ,13,c5ac1edf-e50b-4986-a644-28c96da2e242,-,1608487143147,1608487143422,275,15,681525,2,-,x,-
+2020/12/21 02:59:03.599  ,1,b3e07001-c756-48bc-b04b-039ec9399ce5,-,1608487143131,1608487143599,468,27,42,5,-,o,-
+2020/12/21 02:59:03.599  ,1,a70137b1-8bb3-4ab4-8377-af4a46509db6,-,1608487143115,1608487143599,484,49,10,4,-,o,-
+2020/12/21 02:59:03.646  ,1,604de72f-2772-4ce1-b4f3-71cc818ea12a,-,1608487136632,1608487143646,7014,32,24,2,-,o,-
+2020/12/21 02:59:03.646  ,1,006a2cd5-e8a7-48d0-aab8-dee177ac37ec,-,1608487127728,1608487143646,15918,7,2,5,-,o,-
+2020/12/21 02:59:03.756  ,13,b98e36fc-d10c-49d2-a57e-b1db1b14de03,-,1608487143318,1608487143766,448,46,408915,2,-,o,-
+2020/12/21 02:59:03.756  ,3,a29d2d98-58d3-4379-b235-03373a1c25dc,35,1608487122636,1608487143756,21120,44,167760,3,5,o,-
+2020/12/21 02:59:03.802  ,1,4d64f9c6-26a2-4174-994b-c09d6ed6055a,-,1608487143646,1608487143802,156,2,8,3,-,o,-
+2020/12/21 02:59:03.818  ,13,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487143646,1608487143828,182,24,639585,1,-,o,-
+2020/12/21 02:59:04.037  ,3,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,54,1608487142678,1608487144037,1359,24,639585,2,1,o,-
+2020/12/21 02:59:04.131  ,1,616ddd66-ce4f-4947-9868-3ca6220b1af7,-,1608487141131,1608487144131,3000,30,14,3,-,o,-
+2020/12/21 02:59:04.255  ,1,e763681a-9299-420f-8a10-ce0c94e5b069,-,1608487143943,1608487144255,312,12,6,3,-,o,-
+2020/12/21 02:59:04.255  ,13,a20fae36-789b-4b16-b888-ecc1161f3fc6,-,1608487143756,1608487144265,509,17,52425,3,-,o,-
+2020/12/21 02:59:04.271  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487134305,1608487144271,9966,6,45,3,-,o,-
+2020/12/21 02:59:04.334  ,1,3248784e-4831-40ae-8e3e-6cb04563622d,-,1608487143318,1608487144334,1016,29,30,5,-,o,-
+2020/12/21 02:59:04.552  ,1,d2eaf987-e185-41fa-b812-9d3edf3872e2,-,1608487144162,1608487144552,390,38,4,3,-,o,-
+2020/12/21 02:59:04.771  ,3,a29d2d98-58d3-4379-b235-03373a1c25dc,35,1608487125947,1608487144771,18824,44,230670,1,5,o,-
+2020/12/21 02:59:04.771  ,1,b90e3d61-9356-43a5-b001-8b2bbd69a62f,-,1608487137648,1608487144771,7123,38,24,4,-,o,-
+2020/12/21 02:59:04.880  ,1,b90e3d61-9356-43a5-b001-8b2bbd69a62f,-,1608487139835,1608487144880,5045,38,24,4,-,o,-
+2020/12/21 02:59:04.990  ,1,73f5fdf9-cc74-4279-b9de-d9dd99a6d21f,-,1608487140850,1608487144990,4140,45,24,2,-,o,-
+2020/12/21 02:59:04.990  ,13,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,-,1608487144771,1608487145000,229,24,639585,1,-,o,-
+2020/12/21 02:59:05.052  ,3,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,54,1608487142678,1608487145052,2374,24,639585,3,1,o,-
+2020/12/21 02:59:05.177  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487131430,1608487145177,13747,20,43,5,-,o,-
+2020/12/21 02:59:05.224  ,1,73f5fdf9-cc74-4279-b9de-d9dd99a6d21f,-,1608487142022,1608487145224,3202,45,24,2,-,o,-
+2020/12/21 02:59:05.255  ,1,ecea45a8-5fe4-4390-8084-e802e71729f8,-,1608487144131,1608487145255,1124,14,49,4,-,o,-
+2020/12/21 02:59:05.333  ,1,e763681a-9299-420f-8a10-ce0c94e5b069,-,1608487145068,1608487145333,265,12,6,3,-,o,-
+2020/12/21 02:59:05.411  ,1,73f5fdf9-cc74-4279-b9de-d9dd99a6d21f,-,1608487143147,1608487145411,2264,45,24,2,-,o,-
+2020/12/21 02:59:05.443  ,13,96c4d7ea-c703-4e73-a481-e7ebec8354d2,-,1608487145287,1608487145453,166,23,629100,2,-,x,-
+2020/12/21 02:59:05.599  ,13,d2eaf987-e185-41fa-b812-9d3edf3872e2,-,1608487145287,1608487145609,322,38,94365,2,-,o,-
+2020/12/21 02:59:05.599  ,13,a70137b1-8bb3-4ab4-8377-af4a46509db6,-,1608487145255,1608487145609,354,49,922680,3,-,o,-
+2020/12/21 02:59:05.521  ,1,73f5fdf9-cc74-4279-b9de-d9dd99a6d21f,-,1608487144271,1608487145521,1250,45,24,2,-,o,-
+2020/12/21 02:59:05.646  ,2,09e9397e-48df-452a-91b4-9bea63373bd4,80,1608487138085,1608487145646,7561,14,3,4,1,o,-
+2020/12/21 02:59:05.708  ,13,910ccb4a-a9ff-4aae-b4c1-17f32df42146,-,1608487144896,1608487145718,822,22,1027530,2,-,o,-
+2020/12/21 02:59:05.740  ,1,16d5f10c-ccee-4da9-b618-7e8d2e2868c8,-,1608487145458,1608487145740,282,46,34,4,-,o,-
+2020/12/21 02:59:05.787  ,2,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,87,1608487114387,1608487145787,31400,44,26,9,5,o,-
+2020/12/21 02:59:05.787  ,1,ebe5be71-9647-4568-915a-28534a1dd202,-,1608487128119,1608487145787,17668,46,2,5,-,o,-
+2020/12/21 02:59:05.911  ,1,4d64f9c6-26a2-4174-994b-c09d6ed6055a,-,1608487145787,1608487145911,124,2,8,3,-,o,-
+2020/12/21 02:59:06.130  ,13,a20fae36-789b-4b16-b888-ecc1161f3fc6,-,1608487145911,1608487146140,229,17,52425,3,-,o,-
+2020/12/21 02:59:06.099  ,3,a27a0bd3-59bb-4a17-abd9-37258e0e46b7,54,1608487142678,1608487146099,3421,24,639585,3,1,o,-
+2020/12/21 02:59:06.443  ,1,e763681a-9299-420f-8a10-ce0c94e5b069,-,1608487146193,1608487146443,250,12,6,3,-,o,-
+2020/12/21 02:59:06.521  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487135492,1608487146521,11029,6,45,3,-,o,-
+2020/12/21 02:59:06.521  ,2,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,55,1608487138257,1608487146521,8264,5,20,5,3,o,-
+2020/12/21 02:59:06.536  ,13,96c4d7ea-c703-4e73-a481-e7ebec8354d2,-,1608487146427,1608487146546,119,23,671040,1,-,o,-
+2020/12/21 02:59:06.614  ,1,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,-,1608487145177,1608487146614,1437,43,13,6,-,o,-
+2020/12/21 02:59:06.614  ,2,d2eaf987-e185-41fa-b812-9d3edf3872e2,50,1608487142381,1608487146614,4233,38,4,4,1,o,-
+2020/12/21 02:59:06.630  ,1,73f5fdf9-cc74-4279-b9de-d9dd99a6d21f,-,1608487146521,1608487146630,109,45,24,2,-,o,-
+2020/12/21 02:59:06.692  ,2,b98e36fc-d10c-49d2-a57e-b1db1b14de03,81,1608487140288,1608487146692,6404,46,34,4,1,o,-
+2020/12/21 02:59:06.802  ,3,2177b3df-9b4c-4a6a-921a-7e7b137c7a32,64,1608487121355,1608487146802,25447,44,429885,1,5,o,-
+2020/12/21 02:59:06.911  ,1,16d5f10c-ccee-4da9-b618-7e8d2e2868c8,-,1608487146614,1608487146911,297,46,34,4,-,o,-
+2020/12/21 02:59:07.130  ,2,96c4d7ea-c703-4e73-a481-e7ebec8354d2,22,1608487142490,1608487147130,4640,23,5,5,1,o,-
+2020/12/21 02:59:07.536  ,2,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,55,1608487138257,1608487147536,9279,5,20,5,3,o,-
+2020/12/21 02:59:07.536  ,2,616ddd66-ce4f-4947-9868-3ca6220b1af7,29,1608487144131,1608487147536,3405,30,14,3,1,o,-
+2020/12/21 02:59:07.630  ,2,1cf508a2-dc78-4f07-839d-3e34b8469407,44,1608487112044,1608487147630,35586,33,20,5,1,o,-
+2020/12/21 02:59:07.630  ,13,a20fae36-789b-4b16-b888-ecc1161f3fc6,-,1608487147083,1608487147640,557,17,52425,3,-,o,-
+2020/12/21 02:59:07.645  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487137648,1608487147645,9997,6,45,3,-,o,-
+2020/12/21 02:59:07.739  ,13,a70137b1-8bb3-4ab4-8377-af4a46509db6,-,1608487147411,1608487147749,338,49,933165,2,-,x,-
+2020/12/21 02:59:08.098  ,2,894d5b80-1102-4a26-af28-7c6ffa8fc6d9,33,1608487122448,1608487148098,25650,25,43,6,1,o,-
+2020/12/21 02:59:08.145  ,1,1d8f6cee-3c0e-4968-9868-5d0a6912a119,-,1608487147645,1608487148145,500,45,37,4,-,o,-
+2020/12/21 02:59:08.145  ,3,96c4d7ea-c703-4e73-a481-e7ebec8354d2,22,1608487146536,1608487148145,1609,23,671040,1,1,o,-
+2020/12/21 02:59:08.426  ,2,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,87,1608487114387,1608487148426,34039,44,26,9,5,o,-
+2020/12/21 02:59:08.458  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487132758,1608487148458,15700,33,43,6,-,o,-
+2020/12/21 02:59:08.505  ,1,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487145271,1608487148505,3234,27,38,2,-,o,-
+2020/12/21 02:59:08.567  ,13,a20fae36-789b-4b16-b888-ecc1161f3fc6,-,1608487148239,1608487148577,338,17,52425,3,-,o,-
+2020/12/21 02:59:08.645  ,2,d2eaf987-e185-41fa-b812-9d3edf3872e2,50,1608487142381,1608487148645,6264,38,4,4,1,o,-
+2020/12/21 02:59:08.770  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487140850,1608487148770,7920,6,45,3,-,o,-
+2020/12/21 02:59:08.770  ,13,daf04612-1768-447d-bae8-de742bb67e48,-,1608487148458,1608487148780,322,43,733950,1,-,o,-
+2020/12/21 02:59:08.786  ,13,41c71b01-bf58-40bc-85a6-dd9144023571,-,1608487148567,1608487148796,229,23,744435,2,-,o,-
+2020/12/21 02:59:08.848  ,13,910ccb4a-a9ff-4aae-b4c1-17f32df42146,-,1608487148098,1608487148858,760,22,1027530,2,-,o,-
+2020/12/21 02:59:09.036  ,1,ebe5be71-9647-4568-915a-28534a1dd202,-,1608487129243,1608487149036,19793,46,2,5,-,o,-
+2020/12/21 02:59:09.317  ,1,616ddd66-ce4f-4947-9868-3ca6220b1af7,-,1608487144334,1608487149317,4983,30,14,3,-,o,-
+2020/12/21 02:59:09.317  ,1,1d8f6cee-3c0e-4968-9868-5d0a6912a119,-,1608487148770,1608487149317,547,45,37,4,-,o,-
+2020/12/21 02:59:09.489  ,2,1c38b2dc-b3cc-4e21-800f-d4173e593d8b,87,1608487114387,1608487149489,35102,44,26,9,5,o,-
+2020/12/21 02:59:09.489  ,13,4d64f9c6-26a2-4174-994b-c09d6ed6055a,-,1608487149036,1608487149499,463,2,272610,2,-,x,-
+2020/12/21 02:59:09.567  ,1,3248784e-4831-40ae-8e3e-6cb04563622d,-,1608487146521,1608487149567,3046,29,30,5,-,o,-
+2020/12/21 02:59:09.567  ,2,a00caa50-19c1-412d-b206-d104b6e2f0df,77,1608487138616,1608487149567,10951,2,20,7,1,o,-
+2020/12/21 02:59:09.598  ,13,616ddd66-ce4f-4947-9868-3ca6220b1af7,-,1608487149567,1608487149608,41,30,838800,1,-,o,-
+2020/12/21 02:59:09.629  ,1,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487147411,1608487149629,2218,27,38,2,-,o,-
+2020/12/21 02:59:09.801  ,1,14173805-e6a5-47cd-8a7c-cde8f1e44d42,-,1608487148505,1608487149801,1296,38,46,5,-,o,-
+2020/12/21 02:59:09.801  ,3,daf04612-1768-447d-bae8-de742bb67e48,40,1608487148770,1608487149801,1031,43,733950,1,1,o,-
+2020/12/21 02:59:09.895  ,1,848877cc-c82f-404c-bfdc-6d5ecb00697f,-,1608487142022,1608487149895,7873,6,45,3,-,o,-
+2020/12/21 02:59:09.926  ,1,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487149567,1608487149926,359,49,11,4,-,o,-
+2020/12/21 02:59:10.036  ,13,41c71b01-bf58-40bc-85a6-dd9144023571,-,1608487149786,1608487150046,260,23,744435,2,-,o,-
+2020/12/21 02:59:10.145  ,1,16d5f10c-ccee-4da9-b618-7e8d2e2868c8,-,1608487149801,1608487150145,344,46,34,4,-,o,-
+2020/12/21 02:59:10.364  ,13,1d8f6cee-3c0e-4968-9868-5d0a6912a119,-,1608487149895,1608487150374,479,45,314550,3,-,o,-
+2020/12/21 02:59:10.473  ,1,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,-,1608487150395,1608487150473,78,17,41,2,-,o,-
+2020/12/21 02:59:10.504  ,2,a70137b1-8bb3-4ab4-8377-af4a46509db6,71,1608487141522,1608487150504,8982,49,10,5,1,o,-
+2020/12/21 02:59:10.645  ,3,616ddd66-ce4f-4947-9868-3ca6220b1af7,29,1608487149598,1608487150645,1047,30,838800,1,1,o,-
+2020/12/21 02:59:10.645  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487133883,1608487150645,16762,33,43,6,-,o,-
+2020/12/21 02:59:10.738  ,13,daf04612-1768-447d-bae8-de742bb67e48,-,1608487150645,1608487150748,103,43,733950,1,-,o,-
+2020/12/21 02:59:10.754  ,1,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487148536,1608487150754,2218,27,38,2,-,o,-
+2020/12/21 02:59:10.817  ,2,a70137b1-8bb3-4ab4-8377-af4a46509db6,71,1608487141522,1608487150817,9295,49,10,5,4,o,-
+2020/12/21 02:59:10.895  ,2,a00caa50-19c1-412d-b206-d104b6e2f0df,77,1608487138616,1608487150895,12279,2,20,7,4,o,-
+2020/12/21 02:59:11.238  ,13,41c71b01-bf58-40bc-85a6-dd9144023571,-,1608487150910,1608487151248,338,23,744435,2,-,o,-
+2020/12/21 02:59:11.770  ,3,daf04612-1768-447d-bae8-de742bb67e48,40,1608487148770,1608487151770,3000,43,733950,2,1,o,-
+2020/12/21 02:59:11.910  ,1,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487150676,1608487151910,1234,27,38,2,-,o,-
+2020/12/21 02:59:11.910  ,2,a00caa50-19c1-412d-b206-d104b6e2f0df,77,1608487138616,1608487151910,13294,2,20,7,4,o,-
+2020/12/21 02:59:11.941  ,1,14173805-e6a5-47cd-8a7c-cde8f1e44d42,-,1608487149629,1608487151941,2312,38,46,5,-,o,-
+2020/12/21 02:59:11.973  ,13,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487151801,1608487151983,182,27,975105,1,-,o,-
+2020/12/21 02:59:12.269  ,1,006a2cd5-e8a7-48d0-aab8-dee177ac37ec,-,1608487129962,1608487152269,22307,7,2,5,-,o,-
+2020/12/21 02:59:12.535  ,1,b4c38670-3bcf-4f70-9445-88d611af4d8f,-,1608487151941,1608487152535,594,46,39,3,-,o,-
+2020/12/21 02:59:12.535  ,1,2ae97ab1-44b6-4a6d-bc4d-68f3675ce7bc,-,1608487152051,1608487152535,484,23,1,5,-,o,-
+2020/12/21 02:59:12.753  ,1,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,-,1608487152535,1608487152753,218,17,41,2,-,o,-
+2020/12/21 02:59:12.769  ,1,ecea45a8-5fe4-4390-8084-e802e71729f8,-,1608487149317,1608487152769,3452,14,49,4,-,o,-
+2020/12/21 02:59:12.785  ,1,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487135008,1608487152785,17777,33,43,6,-,o,-
+2020/12/21 02:59:12.832  ,13,daf04612-1768-447d-bae8-de742bb67e48,-,1608487152785,1608487152842,57,43,733950,1,-,o,-
+2020/12/21 02:59:12.925  ,2,a00caa50-19c1-412d-b206-d104b6e2f0df,77,1608487138616,1608487152925,14309,2,20,7,4,o,-
+2020/12/21 02:59:13.253  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487152769,1608487153263,494,49,41940,3,-,o,-
+2020/12/21 02:59:13.785  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487152269,1608487153785,1516,2,30,3,-,o,-
+2020/12/21 02:59:13.863  ,13,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,-,1608487153660,1608487153873,213,17,702495,1,-,o,-
+2020/12/21 02:59:13.863  ,3,daf04612-1768-447d-bae8-de742bb67e48,40,1608487148770,1608487153863,5093,43,733950,3,1,o,-
+2020/12/21 02:59:13.894  ,1,ecea45a8-5fe4-4390-8084-e802e71729f8,-,1608487151457,1608487153894,2437,14,49,4,-,o,-
+2020/12/21 02:59:14.066  ,13,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487153941,1608487154076,135,27,975105,1,-,o,-
+2020/12/21 02:59:14.081  ,1,7e54c792-c825-4028-ba90-5ecda93a0a89,-,1608487153785,1608487154081,296,30,4,5,-,o,-
+2020/12/21 02:59:14.160  ,1,14173805-e6a5-47cd-8a7c-cde8f1e44d42,-,1608487150754,1608487154160,3406,38,46,5,-,o,-
+2020/12/21 02:59:14.253  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487153894,1608487154263,369,49,41940,3,-,o,-
+2020/12/21 02:59:14.394  ,13,b4c38670-3bcf-4f70-9445-88d611af4d8f,-,1608487154160,1608487154404,244,46,62910,2,-,o,-
+2020/12/21 02:59:14.769  ,2,4ca0e728-c765-4e85-ad2b-27f8b6bcfe78,84,1608487130556,1608487154769,24213,0,44,4,1,o,-
+2020/12/21 02:59:14.800  ,3,68b0bce3-4dea-4619-9ef1-8fb002b2033d,88,1608487151973,1608487154800,2827,27,975105,1,1,o,-
+2020/12/21 02:59:14.831  ,1,93640704-622f-45a9-83ce-5092584ebaf8,-,1608487154160,1608487154831,671,38,5,5,-,o,-
+2020/12/21 02:59:14.894  ,3,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,60,1608487153863,1608487154894,1031,17,702495,1,1,o,-
+2020/12/21 02:59:14.956  ,2,5d26c917-5cc2-4343-b03a-0dba80356584,92,1608487122183,1608487154956,32773,6,29,8,6,o,-
+2020/12/21 02:59:15.425  ,1,ebe5be71-9647-4568-915a-28534a1dd202,-,1608487130415,1608487155425,25010,46,2,5,-,o,-
+2020/12/21 02:59:15.831  ,2,b4c38670-3bcf-4f70-9445-88d611af4d8f,34,1608487152535,1608487155831,3296,46,39,3,1,o,-
+2020/12/21 02:59:15.831  ,13,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,-,1608487155800,1608487155841,41,17,702495,1,-,o,-
+2020/12/21 02:59:15.831  ,1,93640704-622f-45a9-83ce-5092584ebaf8,-,1608487155284,1608487155831,547,38,5,5,-,o,-
+2020/12/21 02:59:15.940  ,1,2ae97ab1-44b6-4a6d-bc4d-68f3675ce7bc,-,1608487155269,1608487155940,671,23,1,5,-,o,-
+2020/12/21 02:59:16.159  ,13,68b0bce3-4dea-4619-9ef1-8fb002b2033d,-,1608487156097,1608487156169,72,27,975105,1,-,o,-
+2020/12/21 02:59:16.300  ,1,14173805-e6a5-47cd-8a7c-cde8f1e44d42,-,1608487151910,1608487156300,4390,38,46,5,-,o,-
+2020/12/21 02:59:16.347  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487156097,1608487156357,260,49,52425,2,-,x,-
+2020/12/21 02:59:16.534  ,13,b4c38670-3bcf-4f70-9445-88d611af4d8f,-,1608487156300,1608487156544,244,46,104850,1,-,o,-
+2020/12/21 02:59:16.596  ,2,1cf508a2-dc78-4f07-839d-3e34b8469407,44,1608487112044,1608487156596,44552,33,20,5,7,o,-
+2020/12/21 02:59:16.846  ,3,68b0bce3-4dea-4619-9ef1-8fb002b2033d,88,1608487154066,1608487156846,2780,27,975105,2,1,o,-
+2020/12/21 02:59:16.878  ,3,28284159-fbe1-40b4-a031-e6d9d4dd3f4b,60,1608487155831,1608487156878,1047,17,702495,1,1,o,-
+2020/12/21 02:59:16.940  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487155425,1608487156940,1515,2,30,3,-,o,-
+2020/12/21 02:59:17.096  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487156956,1608487157106,150,43,671040,1,-,o,-
+2020/12/21 02:59:17.206  ,13,7e54c792-c825-4028-ba90-5ecda93a0a89,-,1608487156940,1608487157216,276,30,251640,3,-,x,-
+2020/12/21 02:59:17.221  ,1,ecea45a8-5fe4-4390-8084-e802e71729f8,-,1608487156721,1608487157221,500,14,49,4,-,o,-
+2020/12/21 02:59:17.393  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487157221,1608487157403,182,49,52425,2,-,x,-
+2020/12/21 02:59:17.487  ,x,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487142131,1608487157497,15366,1027530,-,32,-,x,-
+2020/12/21 02:59:17.565  ,3,b4c38670-3bcf-4f70-9445-88d611af4d8f,34,1608487156534,1608487157565,1031,46,104850,1,1,o,-
+2020/12/21 02:59:17.706  ,x,2c6f10f2-259b-4f4b-bdf8-55b34a46bd96,-,1608487142131,1608487157716,15585,1027530,-,32,-,x,-
+2020/12/21 02:59:17.830  ,1,eeea3508-8add-4bfd-a9aa-adfc397a3bba,-,1608487157424,1608487157830,406,46,22,4,-,o,-
+2020/12/21 02:59:17.940  ,1,93640704-622f-45a9-83ce-5092584ebaf8,-,1608487157424,1608487157940,516,38,5,5,-,o,-
+2020/12/21 02:59:18.127  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487158127,1031,43,671040,1,1,o,-
+2020/12/21 02:59:18.193  ,1,2ae97ab1-44b6-4a6d-bc4d-68f3675ce7bc,-,1608487157409,1608487158193,784,23,1,5,-,o,-
+2020/12/21 02:59:18.271  ,2,5d26c917-5cc2-4343-b03a-0dba80356584,92,1608487122183,1608487158271,36088,26,29,9,1,o,-
+2020/12/21 02:59:18.381  ,13,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487157862,1608487158391,529,14,650070,4,-,o,-
+2020/12/21 02:59:18.490  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487158381,1608487158500,119,49,136305,1,-,o,-
+2020/12/21 02:59:18.584  ,1,f797a26e-12bc-4c98-b1fe-717a7c15dc8a,-,1608487135851,1608487158584,22733,8,2,3,-,o,-
+2020/12/21 02:59:18.802  ,1,eeea3508-8add-4bfd-a9aa-adfc397a3bba,-,1608487158537,1608487158802,265,46,22,4,-,o,-
+2020/12/21 02:59:18.865  ,3,68b0bce3-4dea-4619-9ef1-8fb002b2033d,88,1608487154066,1608487158865,4799,27,975105,2,1,o,-
+2020/12/21 02:59:19.349  ,13,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487158990,1608487159359,369,14,650070,4,-,o,-
+2020/12/21 02:59:19.396  ,2,acf8c234-ccd1-4e77-9a0a-a98e2958048b,76,1608487149926,1608487159396,9470,49,11,4,1,o,-
+2020/12/21 02:59:19.708  ,2,1cf508a2-dc78-4f07-839d-3e34b8469407,44,1608487112044,1608487159708,47664,33,20,5,7,o,-
+2020/12/21 02:59:19.927  ,2,7e54c792-c825-4028-ba90-5ecda93a0a89,51,1608487154081,1608487159927,5846,30,4,5,1,o,-
+2020/12/21 02:59:20.052  ,1,2ae97ab1-44b6-4a6d-bc4d-68f3675ce7bc,-,1608487159536,1608487160052,516,23,1,5,-,o,-
+2020/12/21 02:59:20.083  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487158584,1608487160083,1499,2,30,3,-,o,-
+2020/12/21 02:59:20.161  ,1,eeea3508-8add-4bfd-a9aa-adfc397a3bba,-,1608487159708,1608487160161,453,46,22,4,-,o,-
+2020/12/21 02:59:20.161  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487160099,1608487160171,72,43,671040,1,-,o,-
+2020/12/21 02:59:20.349  ,13,7e54c792-c825-4028-ba90-5ecda93a0a89,-,1608487160083,1608487160359,276,30,314550,1,-,o,-
+2020/12/21 02:59:20.661  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487160536,1608487160671,135,49,136305,1,-,o,-
+2020/12/21 02:59:20.724  ,1,f797a26e-12bc-4c98-b1fe-717a7c15dc8a,-,1608487136976,1608487160724,23748,8,2,3,-,o,-
+2020/12/21 02:59:21.083  ,1,67a773b9-d826-4ef4-a5f9-f946299f01a0,-,1608487160849,1608487161083,234,46,26,3,-,o,-
+2020/12/21 02:59:21.255  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487161255,4159,43,671040,2,1,o,-
+2020/12/21 02:59:21.380  ,3,7e54c792-c825-4028-ba90-5ecda93a0a89,51,1608487160349,1608487161380,1031,30,314550,1,1,o,-
+2020/12/21 02:59:21.427  ,3,acf8c234-ccd1-4e77-9a0a-a98e2958048b,76,1608487158490,1608487161427,2937,49,136305,2,1,o,-
+2020/12/21 02:59:21.427  ,13,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487161130,1608487161437,307,14,712980,2,-,o,-
+2020/12/21 02:59:21.536  ,2,f35025cc-6f32-4efd-8688-8505b2bbd92a,47,1608487135851,1608487161536,25685,46,24,5,1,o,-
+2020/12/21 02:59:21.755  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487161708,1608487161765,57,49,136305,1,-,o,-
+2020/12/21 02:59:22.723  ,3,dba5a7d9-18f3-408e-948a-97776ec4ef8a,54,1608487159349,1608487162723,3374,14,650070,4,1,o,-
+2020/12/21 02:59:22.879  ,13,acf8c234-ccd1-4e77-9a0a-a98e2958048b,-,1608487162833,1608487162889,56,49,136305,1,-,o,-
+2020/12/21 02:59:23.129  ,1,67a773b9-d826-4ef4-a5f9-f946299f01a0,-,1608487162989,1608487163129,140,46,26,3,-,o,-
+2020/12/21 02:59:23.332  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487160724,1608487163332,2608,2,30,3,-,o,-
+2020/12/21 02:59:23.364  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487163332,1608487163374,42,43,671040,1,-,o,-
+2020/12/21 02:59:23.661  ,1,e0347199-3966-4975-8941-b3044c0834e7,-,1608487163332,1608487163661,329,30,38,5,-,o,-
+2020/12/21 02:59:23.770  ,2,1cf508a2-dc78-4f07-839d-3e34b8469407,44,1608487112044,1608487163770,51726,33,20,5,7,o,-
+2020/12/21 02:59:24.192  ,13,67a773b9-d826-4ef4-a5f9-f946299f01a0,-,1608487164114,1608487164202,88,46,891225,2,-,o,-
+2020/12/21 02:59:24.395  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487164395,7299,43,671040,3,1,o,-
+2020/12/21 02:59:24.473  ,3,acf8c234-ccd1-4e77-9a0a-a98e2958048b,76,1608487158490,1608487164473,5983,49,136305,4,3,o,-
+2020/12/21 02:59:24.551  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487164457,1608487164561,104,43,671040,1,-,o,-
+2020/12/21 02:59:24.551  ,13,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487164348,1608487164561,213,14,754920,1,-,o,-
+2020/12/21 02:59:24.895  ,1,f797a26e-12bc-4c98-b1fe-717a7c15dc8a,-,1608487138148,1608487164895,26747,8,2,3,-,o,-
+2020/12/21 02:59:25.566  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487165566,8470,43,671040,4,1,o,-
+2020/12/21 02:59:25.582  ,3,dba5a7d9-18f3-408e-948a-97776ec4ef8a,54,1608487164551,1608487165582,1031,14,754920,1,1,o,-
+2020/12/21 02:59:25.879  ,2,bcfdc39e-4df0-46db-a252-6bc25570e20d,64,1608487127322,1608487165879,38557,6,13,5,1,o,-
+2020/12/21 02:59:26.535  ,13,67a773b9-d826-4ef4-a5f9-f946299f01a0,-,1608487166254,1608487166545,291,46,891225,2,-,x,-
+2020/12/21 02:59:26.597  ,13,dba5a7d9-18f3-408e-948a-97776ec4ef8a,-,1608487166504,1608487166607,103,14,754920,1,-,o,-
+2020/12/21 02:59:26.816  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487166597,1608487166826,229,43,671040,1,-,o,-
+2020/12/21 02:59:27.035  ,1,f797a26e-12bc-4c98-b1fe-717a7c15dc8a,-,1608487139272,1608487167035,27763,8,2,3,-,o,-
+2020/12/21 02:59:27.144  ,1,f797a26e-12bc-4c98-b1fe-717a7c15dc8a,-,1608487140444,1608487167144,26700,8,2,3,-,o,-
+2020/12/21 02:59:27.503  ,2,eeea3508-8add-4bfd-a9aa-adfc397a3bba,83,1608487157862,1608487167503,9641,46,22,6,1,o,-
+2020/12/21 02:59:27.628  ,3,dba5a7d9-18f3-408e-948a-97776ec4ef8a,54,1608487164551,1608487167628,3077,14,754920,2,1,o,-
+2020/12/21 02:59:27.675  ,13,67a773b9-d826-4ef4-a5f9-f946299f01a0,-,1608487167394,1608487167685,291,46,891225,2,-,x,-
+2020/12/21 02:59:27.847  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487167847,10751,43,671040,5,1,o,-
+2020/12/21 02:59:28.534  ,3,acf8c234-ccd1-4e77-9a0a-a98e2958048b,76,1608487158490,1608487168534,10044,49,136305,4,3,o,-
+2020/12/21 02:59:28.878  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487168737,1608487168888,151,43,671040,1,-,o,-
+2020/12/21 02:59:29.550  ,3,acf8c234-ccd1-4e77-9a0a-a98e2958048b,76,1608487158490,1608487169550,11060,49,136305,4,3,o,-
+2020/12/21 02:59:29.550  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487164895,1608487169550,4655,2,30,3,-,o,-
+2020/12/21 02:59:29.847  ,13,e0347199-3966-4975-8941-b3044c0834e7,-,1608487169550,1608487169857,307,30,639585,3,-,x,-
+2020/12/21 02:59:29.909  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487169909,12813,43,671040,6,1,o,-
+2020/12/21 02:59:30.675  ,1,313bd24c-ab0e-4e71-bacf-6affab16dbc9,-,1608487167035,1608487170675,3640,2,30,3,-,o,-
+2020/12/21 02:59:30.768  ,13,e0347199-3966-4975-8941-b3044c0834e7,-,1608487170675,1608487170778,103,30,681525,2,-,x,-
+2020/12/21 02:59:30.909  ,13,17196616-8177-45b2-b1c6-2597ab578497,-,1608487170878,1608487170919,41,43,671040,1,-,o,-
+2020/12/21 02:59:31.784  ,3,12dd2cf2-3250-418a-86ce-0bb1eeb034e6,64,1608487114856,1608487171784,56928,16,996075,3,1,o,-
+2020/12/21 02:59:31.940  ,3,17196616-8177-45b2-b1c6-2597ab578497,40,1608487157096,1608487171940,14844,43,671040,7,1,o,-
+2020/12/21 02:59:32.174  ,2,a8f3d4fb-5f81-496f-bea7-0c1266d15e6d,76,1608487104812,1608487172174,67362,32,23,7,1,o,-
+2020/12/21 02:59:33.471  ,1,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487172815,1608487173471,656,30,28,4,-,o,-
+2020/12/21 02:59:33.971  ,2,9355d592-6aa2-4b8d-b0a9-9d58821157c6,38,1608487111123,1608487173971,62848,5,40,7,17,o,-
+2020/12/21 02:59:34.517  ,1,f767424b-0626-4245-933f-30efc8dbeff9,-,1608487174033,1608487174517,484,43,21,4,-,o,-
+2020/12/21 02:59:34.627  ,2,d2d6bbdf-3ed3-4047-8c2c-67c642470a70,45,1608487102609,1608487174627,72018,35,22,7,9,o,-
+2020/12/21 02:59:34.720  ,2,e0347199-3966-4975-8941-b3044c0834e7,80,1608487163661,1608487174720,11059,30,38,5,1,o,-
+2020/12/21 02:59:34.986  ,3,79a20c9d-eb73-4115-9578-58320a312d03,59,1608487124463,1608487174986,50523,14,1038015,3,1,o,-
+2020/12/21 02:59:36.189  ,2,8dd0a3af-7972-412c-8bbf-cfa329536042,48,1608487109592,1608487176189,66597,43,45,5,1,o,-
+2020/12/21 02:59:36.595  ,1,f767424b-0626-4245-933f-30efc8dbeff9,-,1608487176189,1608487176595,406,43,21,4,-,o,-
+2020/12/21 02:59:36.673  ,3,79a20c9d-eb73-4115-9578-58320a312d03,59,1608487124463,1608487176673,52210,14,1038015,3,8,o,-
+2020/12/21 02:59:40.516  ,13,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487180079,1608487180526,447,30,157275,3,-,o,-
+2020/12/21 02:59:41.406  ,13,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487181203,1608487181416,213,30,157275,3,-,o,-
+2020/12/21 02:59:41.734  ,13,f767424b-0626-4245-933f-30efc8dbeff9,-,1608487181422,1608487181744,322,43,94365,2,-,x,-
+2020/12/21 02:59:41.875  ,2,006249ff-f85c-4736-a267-073966d0b848,25,1608487102718,1608487181875,79157,47,15,3,1,o,-
+2020/12/21 02:59:42.875  ,13,f767424b-0626-4245-933f-30efc8dbeff9,-,1608487182609,1608487182885,276,43,94365,2,-,x,-
+2020/12/21 02:59:42.890  ,2,4e249c3f-0fb4-4edc-b861-d7f1f69e2580,45,1608487127447,1608487182890,55443,42,1,7,1,o,-
+2020/12/21 02:59:43.703  ,13,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487183359,1608487183713,354,30,157275,3,-,o,-
+2020/12/21 02:59:43.890  ,2,8a160e27-26cd-4edc-b19b-a7afa0c88102,21,1608487125697,1608487183890,58193,29,10,5,1,o,-
+2020/12/21 02:59:45.093  ,2,e763681a-9299-420f-8a10-ce0c94e5b069,78,1608487144255,1608487185093,40838,12,6,5,1,o,-
+2020/12/21 02:59:46.796  ,13,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487186514,1608487186806,292,30,157275,3,-,o,-
+2020/12/21 02:59:47.249  ,13,9c08b513-e228-41a0-b9bf-3e7a351a21bf,-,1608487186780,1608487187259,479,43,146790,4,-,o,-
+2020/12/21 02:59:49.904  ,13,53c881b1-7513-4859-a404-6e85e74b04de,-,1608487189686,1608487189914,228,30,157275,3,-,o,-
+2020/12/21 02:59:50.123  ,13,9c08b513-e228-41a0-b9bf-3e7a351a21bf,-,1608487189936,1608487190133,197,43,157275,3,-,o,-
+2020/12/21 02:59:50.701  ,2,41c71b01-bf58-40bc-85a6-dd9144023571,45,1608487120370,1608487190701,70331,16,8,4,1,o,-
+2020/12/21 02:59:51.185  ,1,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487190810,1608487191185,375,30,35,4,-,o,-
+2020/12/21 02:59:54.231  ,13,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487193966,1608487194241,275,30,786375,3,-,o,-
+2020/12/21 02:59:54.294  ,2,9355d592-6aa2-4b8d-b0a9-9d58821157c6,38,1608487111123,1608487194294,83171,5,40,7,17,o,-
+2020/12/21 02:59:54.419  ,13,9c08b513-e228-41a0-b9bf-3e7a351a21bf,-,1608487194107,1608487194429,322,43,157275,3,-,o,-
+2020/12/21 02:59:55.325  ,13,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487195091,1608487195335,244,30,786375,3,-,o,-
+2020/12/21 02:59:57.512  ,2,855064fc-b107-4f9a-bc72-4cb040848562,41,1608487103749,1608487197512,93763,12,37,5,1,o,-
+2020/12/21 02:59:57.559  ,13,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487197231,1608487197569,338,30,786375,3,-,o,-
+2020/12/21 03:00:00.386  ,2,9355d592-6aa2-4b8d-b0a9-9d58821157c6,38,1608487111123,1608487200386,89263,5,40,7,17,o,-
+2020/12/21 03:00:00.839  ,13,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487200386,1608487200849,463,30,786375,3,-,o,-
+2020/12/21 03:00:01.042  ,2,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,62,1608487112091,1608487201042,88951,27,47,7,9,o,-
+2020/12/21 03:00:01.730  ,13,9ed2dbba-5835-443c-a245-cdde8bc0ed37,-,1608487201527,1608487201740,213,30,786375,3,-,o,-
+2020/12/21 03:00:02.058  ,2,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,62,1608487112091,1608487202058,89967,27,47,7,9,o,-
+2020/12/21 03:00:04.089  ,2,f27d1153-6c6b-4aa8-9146-24bebaf52c4e,62,1608487112091,1608487204089,91998,27,47,7,9,o,-
+2020/12/21 03:00:06.963  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487206713,1608487206973,260,30,975105,2,-,x,-
+2020/12/21 03:00:07.947  ,2,50f0026a-3665-4965-866c-2614b84763ca,91,1608487109873,1608487207947,98074,3,18,7,1,o,-
+2020/12/21 03:00:08.056  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487207838,1608487208066,228,30,975105,2,-,x,-
+2020/12/21 03:00:12.118  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487212009,1608487212128,119,30,975105,2,-,x,-
+2020/12/21 03:00:13.430  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487213133,1608487213440,307,30,975105,2,-,x,-
+2020/12/21 03:00:14.820  ,2,9c08b513-e228-41a0-b9bf-3e7a351a21bf,23,1608487114387,1608487214820,100433,13,39,4,1,o,-
+2020/12/21 03:00:15.492  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487215273,1608487215502,229,30,975105,2,-,x,-
+2020/12/21 03:00:18.777  ,13,b14f9b2c-79c2-4ed8-9efb-059b1b07e635,-,1608487218460,1608487218787,327,30,975105,2,-,x,-
+2020/12/21 03:00:23.057  ,1,c309fb22-bdb0-4ec2-b7aa-429637ad36f2,-,1608487222651,1608487223057,406,30,14,4,-,o,-
+2020/12/21 03:00:23.401  ,2,238df4f2-73b1-4d72-b7ed-1cbbba8a36bf,44,1608487113107,1608487223401,110294,49,41,4,1,o,-
+2020/12/21 03:00:26.306  ,1,c309fb22-bdb0-4ec2-b7aa-429637ad36f2,-,1608487225806,1608487226306,500,30,14,4,-,o,-
+2020/12/21 03:00:28.103  ,2,63452d5c-261d-4444-b807-af219da8bdb6,58,1608487103952,1608487228103,124151,28,35,7,1,o,-
+2020/12/21 03:00:28.353  ,2,12d71a39-0918-41f7-a3c5-e706227802a2,52,1608487121089,1608487228353,107264,24,19,5,1,o,-
+2020/12/21 03:00:28.650  ,2,8888ef11-d6f0-4147-a67b-e7190ae0910b,61,1608487123698,1608487228650,104952,39,40,8,1,o,-
+2020/12/21 03:00:29.275  ,1,c309fb22-bdb0-4ec2-b7aa-429637ad36f2,-,1608487228962,1608487229275,313,30,14,4,-,o,-
+2020/12/21 03:00:31.462  ,1,c309fb22-bdb0-4ec2-b7aa-429637ad36f2,-,1608487231102,1608487231462,360,30,14,4,-,o,-
+2020/12/21 03:00:33.602  ,3,08391954-40c4-4a15-9544-23f77e5c5103,61,1608487105577,1608487233602,128025,15,796860,4,10,o,-
+2020/12/21 03:00:45.115  ,2,f879d9ec-42a5-475b-943d-c0fd2c2f4db9,61,1608487107171,1608487245115,137944,7,42,5,1,o,-
+2020/12/21 03:00:45.661  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487245661,128962,37,13,16,1,o,-
+2020/12/21 03:00:45.818  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487245818,129119,37,13,16,1,o,-
+2020/12/21 03:00:48.083  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487248083,131384,43,13,18,1,o,-
+2020/12/21 03:00:52.956  ,2,75ae9ed1-317e-49e1-9ca6-521b2f0b5bfa,31,1608487133821,1608487252956,119135,42,21,6,1,o,-
+2020/12/21 03:00:54.034  ,2,e27d87dd-f404-4005-8fbe-5fdfd8615a99,29,1608487107920,1608487254034,146114,25,7,5,1,o,-
+2020/12/21 03:00:54.722  ,14,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487253956,1608487254732,776,671040,650070,3,-,△,-
+2020/12/21 03:00:58.377  ,2,5369b138-4252-4e3f-a689-0341278e6bf1,34,1608487140850,1608487258377,117527,33,43,14,1,o,-
+2020/12/21 03:01:01.080  ,3,08391954-40c4-4a15-9544-23f77e5c5103,61,1608487105577,1608487261080,155503,15,796860,4,10,o,-
+2020/12/21 03:01:01.392  ,2,5369b138-4252-4e3f-a689-0341278e6bf1,34,1608487140850,1608487261392,120542,33,43,14,12,o,-
+2020/12/21 03:01:02.704  ,2,822b82a8-e71b-4e34-8ab3-6dcc6ca9fda3,71,1608487124354,1608487262704,138350,10,7,5,1,o,-
+2020/12/21 03:01:03.438  ,2,89f0c531-211a-4df8-84d1-aeb1e9c02f92,29,1608487116887,1608487263438,146551,45,48,7,1,o,-
+2020/12/21 03:01:04.126  ,2,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,41,1608487102734,1608487264126,161392,31,38,4,19,o,-
+2020/12/21 03:01:04.454  ,2,5369b138-4252-4e3f-a689-0341278e6bf1,34,1608487140850,1608487264454,123604,33,43,14,12,o,-
+2020/12/21 03:01:05.141  ,2,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487114747,1608487265141,150394,15,36,4,10,o,-
+2020/12/21 03:01:06.485  ,2,5369b138-4252-4e3f-a689-0341278e6bf1,34,1608487140850,1608487266485,125635,33,43,14,12,o,-
+2020/12/21 03:01:07.812  ,x,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487253956,1608487267822,13866,639585,-,32,-,x,-
+2020/12/21 03:01:08.031  ,x,5369b138-4252-4e3f-a689-0341278e6bf1,-,1608487253956,1608487268041,14085,639585,-,32,-,x,-
+2020/12/21 03:01:08.515  ,2,848877cc-c82f-404c-bfdc-6d5ecb00697f,71,1608487142022,1608487268515,126493,6,45,8,17,o,-
+2020/12/21 03:01:09.203  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487117762,1608487269203,151441,15,943650,1,10,o,-
+2020/12/21 03:01:09.531  ,2,5369b138-4252-4e3f-a689-0341278e6bf1,34,1608487140850,1608487269531,128681,33,43,14,12,o,-
+2020/12/21 03:01:09.531  ,2,848877cc-c82f-404c-bfdc-6d5ecb00697f,71,1608487142022,1608487269531,127509,6,45,8,17,o,-
+2020/12/21 03:01:09.827  ,2,848877cc-c82f-404c-bfdc-6d5ecb00697f,71,1608487142022,1608487269827,127805,6,45,8,1,o,-
+2020/12/21 03:01:10.546  ,2,848877cc-c82f-404c-bfdc-6d5ecb00697f,71,1608487142022,1608487270546,128524,6,45,8,17,o,-
+2020/12/21 03:01:10.905  ,2,8888ef11-d6f0-4147-a67b-e7190ae0910b,61,1608487123698,1608487270905,147207,39,40,8,15,o,-
+2020/12/21 03:01:11.233  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487120058,1608487271233,151175,15,943650,5,10,o,-
+2020/12/21 03:01:11.561  ,2,848877cc-c82f-404c-bfdc-6d5ecb00697f,71,1608487142022,1608487271561,129539,6,45,8,17,o,-
+2020/12/21 03:01:13.264  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487120058,1608487273264,153206,15,943650,5,10,o,-
+2020/12/21 03:01:14.280  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487120058,1608487274280,154222,15,943650,5,10,o,-
+2020/12/21 03:01:14.748  ,2,f767424b-0626-4245-933f-30efc8dbeff9,92,1608487174517,1608487274748,100231,43,21,5,1,o,-
+2020/12/21 03:01:15.295  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487120058,1608487275295,155237,15,943650,5,10,o,-
+2020/12/21 03:01:16.310  ,3,5a3553e8-4917-4548-a777-c62b3493e057,49,1608487120058,1608487276310,156252,15,943650,5,10,o,-
+2020/12/21 03:01:17.326  ,2,c5ac1edf-e50b-4986-a644-28c96da2e242,70,1608487136601,1608487277326,140725,15,7,4,10,o,-
+2020/12/21 03:01:25.436  ,2,2a2e8ace-f53e-48e2-8e85-0e83b5efab1c,41,1608487102734,1608487285436,182702,31,38,4,19,o,-
+2020/12/21 03:01:31.200  ,2,8888ef11-d6f0-4147-a67b-e7190ae0910b,61,1608487123698,1608487291200,167502,39,40,8,15,o,-
+2020/12/21 03:01:36.277  ,2,8888ef11-d6f0-4147-a67b-e7190ae0910b,61,1608487123698,1608487296277,172579,39,40,8,15,o,-
+2020/12/21 03:01:37.293  ,2,8888ef11-d6f0-4147-a67b-e7190ae0910b,61,1608487123698,1608487297293,173595,39,40,8,15,o,-
+2020/12/21 03:01:38.933  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487298933,187810,4,13,9,1,o,-
+2020/12/21 03:01:39.011  ,2,72b0d9f0-686d-4a3b-a52a-fdea55e007cc,35,1608487104812,1608487299011,194199,45,6,5,1,o,-
+2020/12/21 03:01:42.854  ,2,b9a9b0a9-2892-4124-995a-60f033fc3abe,42,1608487121620,1608487302854,181234,48,3,5,1,o,-
+2020/12/21 03:01:43.713  ,2,dafa01da-0685-42db-beae-7c640eb514d6,60,1608487108655,1608487303713,195058,40,18,7,21,o,-
+2020/12/21 03:01:44.088  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487304088,187389,43,13,18,22,o,-
+2020/12/21 03:01:44.728  ,2,b9a9b0a9-2892-4124-995a-60f033fc3abe,42,1608487121620,1608487304728,183108,48,3,5,19,o,-
+2020/12/21 03:01:44.916  ,2,82c0d2ca-786d-4bfe-ac5f-5f279b0bd597,35,1608487130290,1608487304916,174626,15,41,7,1,o,-
+2020/12/21 03:01:47.774  ,2,b9a9b0a9-2892-4124-995a-60f033fc3abe,42,1608487121620,1608487307774,186154,48,3,5,19,o,-
+2020/12/21 03:01:49.805  ,2,b9a9b0a9-2892-4124-995a-60f033fc3abe,42,1608487121620,1608487309805,188185,48,3,5,19,o,-
+2020/12/21 03:01:56.101  ,2,3a382315-0307-4af1-b1ff-b4f2de4e1995,54,1608487113013,1608487316101,203088,10,34,5,1,o,-
+2020/12/21 03:01:58.553  ,2,8c3368fe-8d22-40a9-afdc-8b0a754e819e,45,1608487124120,1608487318553,194433,25,23,4,1,o,-
+2020/12/21 03:02:00.974  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487320974,209851,4,13,9,19,o,-
+2020/12/21 03:02:03.443  ,2,ebe5be71-9647-4568-915a-28534a1dd202,98,1608487136148,1608487323443,187295,46,2,11,1,o,-
+2020/12/21 03:02:05.723  ,3,9c08b513-e228-41a0-b9bf-3e7a351a21bf,23,1608487187249,1608487325723,138474,43,146790,4,1,o,-
+2020/12/21 03:02:06.739  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487326739,215616,23,13,12,1,o,-
+2020/12/21 03:02:12.144  ,2,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,73,1608487131618,1608487332144,200526,45,33,8,14,o,-
+2020/12/21 03:02:13.581  ,2,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,73,1608487131618,1608487333581,201963,45,33,8,1,o,-
+2020/12/21 03:02:14.175  ,2,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,73,1608487131618,1608487334175,202557,45,33,8,14,o,-
+2020/12/21 03:02:15.018  ,2,eba158f0-45b8-41c6-bc0b-8570a3e7a354,44,1608487118465,1608487335018,216553,28,14,5,1,o,-
+2020/12/21 03:02:15.190  ,2,eb4eeded-eb9c-4e7f-aadd-3d09fa8d4a6a,73,1608487131618,1608487335190,203572,45,33,8,14,o,-
+2020/12/21 03:02:15.299  ,2,f55d2f93-d8de-4309-a074-f37d9f86645f,74,1608487118965,1608487335299,216334,29,40,7,1,o,-
+2020/12/21 03:02:24.677  ,2,90f4b429-249f-4d0c-afce-4ebfd7fd7622,77,1608487108889,1608487344677,235788,31,16,9,1,o,-
+2020/12/21 03:02:25.755  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487345755,229056,43,13,18,22,o,-
+2020/12/21 03:02:28.801  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487348801,232102,43,13,18,22,o,-
+2020/12/21 03:02:37.939  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487357939,241240,43,13,18,22,o,-
+2020/12/21 03:02:39.970  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487359970,243271,43,13,18,22,o,-
+2020/12/21 03:02:40.986  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487360986,244287,43,13,18,22,o,-
+2020/12/21 03:02:42.001  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487362001,245302,43,13,18,22,o,-
+2020/12/21 03:02:46.063  ,2,a8b34258-48cc-410c-8e50-a31e3dd8f7b3,31,1608487116699,1608487366063,249364,43,13,18,22,o,-
+2020/12/21 03:02:46.641  ,2,e27d87dd-f404-4005-8fbe-5fdfd8615a99,29,1608487107920,1608487366641,258721,25,7,5,25,o,-
+2020/12/21 03:02:52.155  ,2,87ee1fc6-9221-45ab-a9b6-570f4addd5a0,44,1608487129962,1608487372155,242193,0,32,8,17,o,-
+2020/12/21 03:02:52.764  ,2,39d8bcc0-3c9a-4457-9b85-1902a7b0b122,45,1608487109873,1608487372764,262891,47,40,5,1,o,-
+2020/12/21 03:02:52.905  ,2,87ee1fc6-9221-45ab-a9b6-570f4addd5a0,44,1608487129962,1608487372905,242943,0,32,8,1,o,-
+2020/12/21 03:02:54.186  ,2,2444745c-0318-48fc-84f0-d2730c132c85,88,1608487135336,1608487374186,238850,32,45,7,1,o,-
+2020/12/21 03:02:54.779  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487374779,263656,23,13,12,16,o,-
+2020/12/21 03:02:54.842  ,14,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487374311,1608487374852,541,817830,796860,3,-,△,-
+2020/12/21 03:02:56.263  ,2,6ab3e7ae-c39e-493a-a964-b796099ed3e1,37,1608487116356,1608487376263,259907,49,28,13,1,o,-
+2020/12/21 03:02:56.263  ,2,6ab3e7ae-c39e-493a-a964-b796099ed3e1,37,1608487116356,1608487376263,259907,49,28,13,1,o,-
+2020/12/21 03:02:58.841  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487378841,267718,23,13,12,16,o,-
+2020/12/21 03:03:01.887  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487381887,270764,23,13,12,16,o,-
+2020/12/21 03:03:02.356  ,3,41c71b01-bf58-40bc-85a6-dd9144023571,45,1608487151238,1608487382356,231118,23,744435,2,22,o,-
+2020/12/21 03:03:03.435  ,3,41c71b01-bf58-40bc-85a6-dd9144023571,45,1608487151238,1608487383435,232197,23,744435,2,1,o,-
+2020/12/21 03:03:03.916  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487383916,272793,23,13,12,16,o,-
+2020/12/21 03:03:07.425  ,3,41c71b01-bf58-40bc-85a6-dd9144023571,45,1608487151238,1608487387425,236187,23,744435,2,22,o,-
+2020/12/21 03:03:07.878  ,x,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487374311,1608487387888,13577,786375,-,32,-,x,-
+2020/12/21 03:03:08.159  ,x,6ab3e7ae-c39e-493a-a964-b796099ed3e1,-,1608487374311,1608487388169,13858,786375,-,32,-,x,-
+2020/12/21 03:03:08.441  ,2,50f0026a-3665-4965-866c-2614b84763ca,91,1608487109873,1608487388441,278568,3,18,7,22,o,-
+2020/12/21 03:03:09.456  ,2,50f0026a-3665-4965-866c-2614b84763ca,91,1608487109873,1608487389456,279583,3,18,7,22,o,-
+2020/12/21 03:03:10.003  ,2,129e041f-f175-4198-9f1d-c4086e7e84e4,57,1608487111123,1608487390003,278880,23,13,12,16,o,-

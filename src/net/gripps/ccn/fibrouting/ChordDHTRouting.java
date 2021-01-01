@@ -52,6 +52,7 @@ public class ChordDHTRouting extends BaseRouting {
         return rMap.get(routerID);
     }
 
+
     @Override
     public Long addFaceToFIBAsNewEntry(String prefix, CCNRouter router) {
         long hid =  this.calcHashCode(prefix.toString().hashCode());
@@ -66,8 +67,13 @@ public class ChordDHTRouting extends BaseRouting {
             //ルータのPITを取得する．
             PIT pit = retRouter.getPITEntry();
             if(pit.getTable().size() > CCNUtil.ccn_chord_pit_threshold){
-                fIte.next();
-                continue;
+                if(fIte.hasNext()){
+                    fIte.next();
+                    continue;
+                }else{
+                    break;
+                }
+
             }
 
 
@@ -93,6 +99,8 @@ public class ChordDHTRouting extends BaseRouting {
     public long getNearIDAndShortQueueRouter(Iterator<Face> fIte, long hid){
         return 0;
     }
+
+
 
 
 
@@ -620,6 +628,34 @@ public class ChordDHTRouting extends BaseRouting {
 
     }
 
+    /**
+     * 指定のfidよりも大きいIDの中で、最も距離が小さいものを選ぶ。。
+     * @param fIte
+     * @param fid
+     * @return
+     */
+    public long getSucRouter(Iterator<Face> fIte, Long fid){
+        return  this.getNearestIDFromIterator(fIte, fid);
+    }
+
+    /**
+     * 指定のfidよりも小さいIDの中で、最も距離が小さいものを選ぶ。。
+     * @param fIte
+     * @param fid
+     * @return
+     */
+    /**
+     * 以下のところを自分で書く。上のgetNearetIDfromIteratorを参考にする。
+     * @param fIte
+     * @param fid
+     * @return
+     */
+    public long getPredRouter(Iterator<Face> fIte, Long fid){
+        return this.getNearestPredIDFromIterator(fIte, fid);
+    }
+
+
+
 
     /**
      * Set<Long>から，最もIDが近いものを返す．
@@ -696,6 +732,40 @@ public class ChordDHTRouting extends BaseRouting {
 
         }
     }
+
+    //指定のfidよりも小さいIDの中で、最も距離が小さいものを選ぶ。
+    public long getNearestPredIDFromIterator(Iterator<Face> fIte, Long fid) {
+        long mindif = CCNUtil.MAXValue;
+        long retID = fid.longValue();
+        Long minID = fid.longValue();
+        while (fIte.hasNext()) {
+            Face f = fIte.next();
+            Long id = f.getPointerID();
+            if (fid.longValue() >= id.longValue()) {
+                long dif = fid.longValue() - id.longValue();
+
+                if (mindif >= dif) {
+                    mindif = dif;
+                    retID = id.longValue();
+                }
+
+
+            } else {
+                //idが大きい場合，とりあえず最小値？を保持しておく．
+                if (minID <= id) {
+                    minID = id;
+                }
+                continue;
+            }
+        }
+        if (retID == CCNUtil.MINUS_VAUE) {
+            return minID;
+        } else {
+            return retID;
+
+        }
+    }
+
 
 
 }
